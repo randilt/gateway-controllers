@@ -15,7 +15,7 @@
  *
  */
 
-// Package typesafejevguardrail screens request and response content using TypeSafe
+// Package typesafejevcontentsafety screens request and response content using TypeSafe
 // AI's Jev "System One" model (https://typesafe.ai). Jev answers typed
 // questions about a piece of text rather than generating text itself: a
 // Noul question returns a calibrated yes/no probability, a Score question
@@ -29,7 +29,7 @@
 // detection plus an overall severity score, ported from Jev's own published
 // llm_guardrails cookbook, but operators can add, remove, or reword any
 // question to cover hazards that battery doesn't.
-package typesafejevguardrail
+package typesafejevcontentsafety
 
 import (
 	"bytes"
@@ -108,9 +108,9 @@ func defaultQuestions() []guardrailQuestion {
 	}
 }
 
-// TypesafeJevGuardrailPolicy implements a configurable Jev-backed guardrail for
+// TypesafeJevContentSafetyPolicy implements a configurable Jev-backed guardrail for
 // request and/or response content.
-type TypesafeJevGuardrailPolicy struct {
+type TypesafeJevContentSafetyPolicy struct {
 	apiKey  string
 	baseURL string
 	model   string
@@ -118,11 +118,11 @@ type TypesafeJevGuardrailPolicy struct {
 
 	hasRequestParams  bool
 	hasResponseParams bool
-	requestParams     typesafeJevGuardrailPhaseParams
-	responseParams    typesafeJevGuardrailPhaseParams
+	requestParams     typesafeJevContentSafetyPhaseParams
+	responseParams    typesafeJevContentSafetyPhaseParams
 }
 
-type typesafeJevGuardrailPhaseParams struct {
+type typesafeJevContentSafetyPhaseParams struct {
 	JSONPath           string
 	Questions          []guardrailQuestion
 	PassthroughOnError bool
@@ -139,7 +139,7 @@ func GetPolicy(
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	p := &TypesafeJevGuardrailPolicy{
+	p := &TypesafeJevContentSafetyPolicy{
 		apiKey:  apiKey,
 		baseURL: stringParamOrDefault(params, "baseURL", defaultBaseURL),
 		model:   stringParamOrDefault(params, "model", defaultModel),
@@ -168,7 +168,7 @@ func GetPolicy(
 		return nil, fmt.Errorf("at least one of 'request' or 'response' parameters must be provided")
 	}
 
-	slog.Debug("TypesafeJevGuardrail: Policy initialized",
+	slog.Debug("TypesafeJevContentSafety: Policy initialized",
 		"hasRequestParams", p.hasRequestParams, "hasResponseParams", p.hasResponseParams)
 
 	return p, nil
@@ -178,7 +178,7 @@ func GetPolicy(
 // in this repo (e.g. azure-content-safety-content-moderation): a phase with
 // no configured params is a no-op in OnRequestBody/OnResponseBody rather
 // than being skipped at the Mode level.
-func (p *TypesafeJevGuardrailPolicy) Mode() policy.ProcessingMode {
+func (p *TypesafeJevContentSafetyPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
 		RequestBodyMode:    policy.BodyModeBuffer,
@@ -187,7 +187,7 @@ func (p *TypesafeJevGuardrailPolicy) Mode() policy.ProcessingMode {
 	}
 }
 
-func (p *TypesafeJevGuardrailPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
+func (p *TypesafeJevContentSafetyPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
 	if !p.hasRequestParams {
 		return policy.UpstreamRequestModifications{}
 	}
@@ -198,7 +198,7 @@ func (p *TypesafeJevGuardrailPolicy) OnRequestBody(ctx context.Context, reqCtx *
 	return p.screen(ctx, content, p.requestParams, false).(policy.RequestAction)
 }
 
-func (p *TypesafeJevGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx *policy.ResponseContext, _ map[string]interface{}) policy.ResponseAction {
+func (p *TypesafeJevContentSafetyPolicy) OnResponseBody(ctx context.Context, respCtx *policy.ResponseContext, _ map[string]interface{}) policy.ResponseAction {
 	if !p.hasResponseParams {
 		return policy.DownstreamResponseModifications{}
 	}
@@ -213,7 +213,7 @@ func (p *TypesafeJevGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx
 // returns either a passthrough action or a blocking one. Returns interface{}
 // so one implementation serves both phases, exactly as
 // azure-content-safety-content-moderation.validatePayload does.
-func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte, params typesafeJevGuardrailPhaseParams, isResponse bool) interface{} {
+func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, payload []byte, params typesafeJevContentSafetyPhaseParams, isResponse bool) interface{} {
 	passthrough := func() interface{} {
 		if isResponse {
 			return policy.DownstreamResponseModifications{}
@@ -222,7 +222,7 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 	}
 
 	if len(params.Questions) == 0 {
-		slog.Debug("TypesafeJevGuardrail: No questions configured, passing through", "isResponse", isResponse)
+		slog.Debug("TypesafeJevContentSafety: No questions configured, passing through", "isResponse", isResponse)
 		return passthrough()
 	}
 	if payload == nil {
@@ -232,7 +232,7 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JSONPath)
 	if err != nil {
 		if params.PassthroughOnError {
-			slog.Debug("TypesafeJevGuardrail: JSONPath extraction error, passthrough enabled",
+			slog.Debug("TypesafeJevContentSafety: JSONPath extraction error, passthrough enabled",
 				"jsonPath", params.JSONPath, "error", err, "isResponse", isResponse)
 			return passthrough()
 		}
@@ -246,7 +246,7 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 	answers, err := p.callJev(ctx, extractedValue, params.Questions)
 	if err != nil {
 		if params.PassthroughOnError {
-			slog.Debug("TypesafeJevGuardrail: Jev API call error, passthrough enabled", "error", err, "isResponse", isResponse)
+			slog.Debug("TypesafeJevContentSafety: Jev API call error, passthrough enabled", "error", err, "isResponse", isResponse)
 			return passthrough()
 		}
 		return p.buildErrorResponse("Error calling Jev API", nil, isResponse, params.ShowAssessment)
@@ -274,11 +274,11 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 			// fail-closed operator's request would be silently let through on a
 			// partial response.
 			if params.PassthroughOnError {
-				slog.Debug("TypesafeJevGuardrail: failed to process answer, passthrough enabled",
+				slog.Debug("TypesafeJevContentSafety: failed to process answer, passthrough enabled",
 					"question", q.Key, "error", err, "isResponse", isResponse)
 				return passthrough()
 			}
-			slog.Debug("TypesafeJevGuardrail: failed to process answer, failing closed",
+			slog.Debug("TypesafeJevContentSafety: failed to process answer, failing closed",
 				"question", q.Key, "error", err, "isResponse", isResponse)
 			return p.buildErrorResponse("Error processing Jev response", nil, isResponse, params.ShowAssessment)
 		}
@@ -290,17 +290,17 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 	}
 
 	if len(failed) > 0 {
-		slog.Debug("TypesafeJevGuardrail: violation detected", "failedQuestions", failed, "isResponse", isResponse)
-		return p.buildErrorResponse("Request failed one or more Jev guardrail checks", failed, isResponse, params.ShowAssessment)
+		slog.Debug("TypesafeJevContentSafety: violation detected", "failedQuestions", failed, "isResponse", isResponse)
+		return p.buildErrorResponse("Request failed one or more Jev content safety checks", failed, isResponse, params.ShowAssessment)
 	}
 
 	return passthrough()
 }
 
-func (p *TypesafeJevGuardrailPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool) interface{} {
+func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool) interface{} {
 	assessment := map[string]interface{}{
 		"action":               "GUARDRAIL_INTERVENED",
-		"interveningGuardrail": "TypesafeJevGuardrail",
+		"interveningGuardrail": "TypesafeJevContentSafety",
 	}
 	if isResponse {
 		assessment["direction"] = "RESPONSE"
@@ -310,9 +310,9 @@ func (p *TypesafeJevGuardrailPolicy) buildErrorResponse(reason string, failed []
 	if failed == nil {
 		assessment["actionReason"] = reason
 	} else if isResponse {
-		assessment["actionReason"] = "Response failed one or more Jev guardrail checks."
+		assessment["actionReason"] = "Response failed one or more Jev content safety checks."
 	} else {
-		assessment["actionReason"] = "Request failed one or more Jev guardrail checks."
+		assessment["actionReason"] = "Request failed one or more Jev content safety checks."
 	}
 	if showAssessment && failed != nil {
 		assessment["assessments"] = failed
@@ -320,16 +320,16 @@ func (p *TypesafeJevGuardrailPolicy) buildErrorResponse(reason string, failed []
 
 	analyticsMetadata := map[string]interface{}{
 		"isGuardrailHit": true,
-		"guardrailName":  "TypesafeJevGuardrail",
+		"guardrailName":  "TypesafeJevContentSafety",
 	}
 
 	responseBody := map[string]interface{}{
-		"type":    "TYPESAFE_JEV_GUARDRAIL",
+		"type":    "TYPESAFE_JEV_CONTENT_SAFETY",
 		"message": assessment,
 	}
 	bodyBytes, err := json.Marshal(responseBody)
 	if err != nil {
-		bodyBytes = []byte(`{"type":"TYPESAFE_JEV_GUARDRAIL","message":"Internal error"}`)
+		bodyBytes = []byte(`{"type":"TYPESAFE_JEV_CONTENT_SAFETY","message":"Internal error"}`)
 	}
 
 	if isResponse {
@@ -367,7 +367,7 @@ type jevSystemOneResponse struct {
 	Answers map[string]json.RawMessage `json:"answers"`
 }
 
-func (p *TypesafeJevGuardrailPolicy) callJev(ctx context.Context, state string, questions []guardrailQuestion) (map[string]json.RawMessage, error) {
+func (p *TypesafeJevContentSafetyPolicy) callJev(ctx context.Context, state string, questions []guardrailQuestion) (map[string]json.RawMessage, error) {
 	questionMap := make(map[string]jevQuestionPayload, len(questions))
 	for _, q := range questions {
 		questionMap[q.Key] = jevQuestionPayload{
@@ -467,8 +467,8 @@ func stringParamOrDefault(params map[string]interface{}, key, def string) string
 	return def
 }
 
-func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (typesafeJevGuardrailPhaseParams, error) {
-	result := typesafeJevGuardrailPhaseParams{JSONPath: defaultJSONPath}
+func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (typesafeJevContentSafetyPhaseParams, error) {
+	result := typesafeJevContentSafetyPhaseParams{JSONPath: defaultJSONPath}
 
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
 		jsonPath, ok := jsonPathRaw.(string)

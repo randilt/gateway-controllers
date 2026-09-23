@@ -1,4 +1,4 @@
-name: typesafe-jev-guardrail
+name: typesafe-jev-content-safety
 version: v1.0.0
 description: |
   Screens request and/or response content using TypeSafe AI's Jev "System One"
@@ -12,7 +12,7 @@ parameters:
     request:
       type: object
       x-wso2-policy-advanced-param: false
-      description: Specifies Jev guardrail settings for request payloads.
+      description: Specifies Jev content safety settings for request payloads.
       properties:
         jsonPath:
           type: string
@@ -93,7 +93,7 @@ parameters:
     response:
       type: object
       x-wso2-policy-advanced-param: false
-      description: Specifies Jev guardrail settings for response payloads.
+      description: Specifies Jev content safety settings for response payloads.
       properties:
         jsonPath:
           type: string

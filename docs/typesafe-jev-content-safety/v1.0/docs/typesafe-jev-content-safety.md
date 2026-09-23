@@ -1,11 +1,11 @@
 ---
 title: "Overview"
 ---
-# TypeSafe Jev Guardrail
+# TypeSafe Jev Content Safety
 
 ## Overview
 
-The TypeSafe Jev Guardrail policy screens request or response content using [TypeSafe AI's Jev](https://typesafe.ai/) "System One" model. Unlike a text-generating LLM, Jev takes a piece of text (the "state") and a battery of typed questions, and returns calibrated structured answers: a `noul` question returns a yes/no probability, a `score` question returns a position on a scale you define. The policy buffers the request or response body, extracts the target text using a configurable JSONPath expression, sends the configured question battery to Jev, and blocks when any question's answer crosses its threshold.
+The TypeSafe Jev Content Safety policy screens request or response content using [TypeSafe AI's Jev](https://typesafe.ai/) "System One" model. Unlike a text-generating LLM, Jev takes a piece of text (the "state") and a battery of typed questions, and returns calibrated structured answers: a `noul` question returns a yes/no probability, a `score` question returns a position on a scale you define. The policy buffers the request or response body, extracts the target text using a configurable JSONPath expression, sends the configured question battery to Jev, and blocks when any question's answer crosses its threshold.
 
 The question battery is not fixed. The default battery covers jailbreak, harmful-request, and self-harm detection plus an overall severity score — ported from Jev's own published [`llm_guardrails` cookbook](https://docs.typesafe.ai/cookbooks/llm_guardrails) — but every question can be added, removed, or reworded per policy attachment to cover hazards that battery doesn't catch.
 
@@ -23,7 +23,7 @@ Use this policy when you need content-level screening beyond pattern matching (`
 
 ## Configuration
 
-The TypeSafe Jev Guardrail policy uses a two-level configuration: system parameters that hold your TypeSafe API credential, and per-route user parameters that control screening behaviour.
+The TypeSafe Jev Content Safety policy uses a two-level configuration: system parameters that hold your TypeSafe API credential, and per-route user parameters that control screening behaviour.
 
 ### System Parameters (From config.toml)
 
@@ -90,8 +90,8 @@ The `jsonPath` parameter uses simple dot-separated traversal and supports array 
 Inside the `api-platform` repository, add the policy package under `policies:` in `/gateway/build.yaml`:
 
 ```yaml
-- name: typesafe-jev-guardrail
-  gomodule: github.com/wso2/gateway-controllers/policies/typesafe-jev-guardrail@v1
+- name: typesafe-jev-content-safety
+  gomodule: github.com/wso2/gateway-controllers/policies/typesafe-jev-content-safety@v1
 ```
 
 ## Reference Scenarios
@@ -122,7 +122,7 @@ spec:
       - path: /chat/completions
         methods: [POST]
   operationPolicies:
-    - name: typesafe-jev-guardrail
+    - name: typesafe-jev-content-safety
       version: v1
       paths:
         - path: /chat/completions
@@ -162,11 +162,11 @@ When the request is blocked, the policy returns HTTP `422`:
 
 ```json
 {
-  "type": "TYPESAFE_JEV_GUARDRAIL",
+  "type": "TYPESAFE_JEV_CONTENT_SAFETY",
   "message": {
     "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "TypesafeJevGuardrail",
-    "actionReason": "Request failed one or more Jev guardrail checks.",
+    "interveningGuardrail": "TypesafeJevContentSafety",
+    "actionReason": "Request failed one or more Jev content safety checks.",
     "direction": "REQUEST"
   }
 }
@@ -178,7 +178,7 @@ Replace the default battery entirely with your own questions, and enable assessm
 
 ```yaml
 operationPolicies:
-  - name: typesafe-jev-guardrail
+  - name: typesafe-jev-content-safety
     version: v1
     paths:
       - path: /chat/completions
@@ -211,11 +211,11 @@ When a request is blocked with `showAssessment: true`, the response body include
 
 ```json
 {
-  "type": "TYPESAFE_JEV_GUARDRAIL",
+  "type": "TYPESAFE_JEV_CONTENT_SAFETY",
   "message": {
     "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "TypesafeJevGuardrail",
-    "actionReason": "Request failed one or more Jev guardrail checks.",
+    "interveningGuardrail": "TypesafeJevContentSafety",
+    "actionReason": "Request failed one or more Jev content safety checks.",
     "direction": "REQUEST",
     "assessments": [
       {"question": "pii_request", "type": "noul", "value": 0.93, "threshold": 0.5}
@@ -230,7 +230,7 @@ Configure independent batteries for each phase, and allow traffic to proceed if 
 
 ```yaml
 operationPolicies:
-  - name: typesafe-jev-guardrail
+  - name: typesafe-jev-content-safety
     version: v1
     paths:
       - path: /chat/completions
@@ -253,10 +253,10 @@ When the Jev API is unreachable and `passthroughOnError` is `false` (the default
 
 ```json
 {
-  "type": "TYPESAFE_JEV_GUARDRAIL",
+  "type": "TYPESAFE_JEV_CONTENT_SAFETY",
   "message": {
     "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "TypesafeJevGuardrail",
+    "interveningGuardrail": "TypesafeJevContentSafety",
     "actionReason": "Error calling Jev API",
     "direction": "REQUEST"
   }

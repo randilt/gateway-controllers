@@ -15,7 +15,7 @@
  *
  */
 
-package typesafejevguardrail
+package typesafejevcontentsafety
 
 import (
 	"context"
@@ -28,8 +28,8 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
-func TestTypesafeJevGuardrailPolicy_Mode(t *testing.T) {
-	p := &TypesafeJevGuardrailPolicy{}
+func TestTypesafeJevContentSafetyPolicy_Mode(t *testing.T) {
+	p := &TypesafeJevContentSafetyPolicy{}
 	got := p.Mode()
 	want := policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
@@ -86,7 +86,7 @@ func TestGetPolicy_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	jp := p.(*TypesafeJevGuardrailPolicy)
+	jp := p.(*TypesafeJevContentSafetyPolicy)
 	if jp.baseURL != defaultBaseURL {
 		t.Fatalf("unexpected default baseURL: %q", jp.baseURL)
 	}
@@ -180,7 +180,7 @@ func mockJevServer(t *testing.T, noulAnswers map[string]float64, scoreAnswers ma
 	}))
 }
 
-func newTestPolicy(t *testing.T, baseURL string, questions []interface{}) *TypesafeJevGuardrailPolicy {
+func newTestPolicy(t *testing.T, baseURL string, questions []interface{}) *TypesafeJevContentSafetyPolicy {
 	t.Helper()
 	p, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
 		"apiKey":  "test-key",
@@ -194,7 +194,7 @@ func newTestPolicy(t *testing.T, baseURL string, questions []interface{}) *Types
 	if err != nil {
 		t.Fatalf("GetPolicy failed: %v", err)
 	}
-	return p.(*TypesafeJevGuardrailPolicy)
+	return p.(*TypesafeJevContentSafetyPolicy)
 }
 
 func TestOnRequestBody_PassesBenignContent(t *testing.T) {
@@ -239,7 +239,7 @@ func TestOnRequestBody_BlocksOnNoulThreshold(t *testing.T) {
 	if err := json.Unmarshal(imm.Body, &body); err != nil {
 		t.Fatalf("failed to parse block body: %v", err)
 	}
-	if body["type"] != "TYPESAFE_JEV_GUARDRAIL" {
+	if body["type"] != "TYPESAFE_JEV_CONTENT_SAFETY" {
 		t.Fatalf("unexpected envelope type: %v", body["type"])
 	}
 }
@@ -287,7 +287,7 @@ func TestOnRequestBody_PassthroughOnErrorWhenConfigured(t *testing.T) {
 		t.Fatalf("GetPolicy failed: %v", err)
 	}
 
-	action := p.(*TypesafeJevGuardrailPolicy).OnRequestBody(context.Background(), &policy.RequestContext{
+	action := p.(*TypesafeJevContentSafetyPolicy).OnRequestBody(context.Background(), &policy.RequestContext{
 		SharedContext: &policy.SharedContext{},
 		Body:          &policy.Body{Content: []byte(`{"input":"hello"}`), Present: true},
 	}, nil)
@@ -335,7 +335,7 @@ func TestOnResponseBody_UsesResponseParams(t *testing.T) {
 		t.Fatalf("GetPolicy failed: %v", err)
 	}
 
-	action := p.(*TypesafeJevGuardrailPolicy).OnResponseBody(context.Background(), &policy.ResponseContext{
+	action := p.(*TypesafeJevContentSafetyPolicy).OnResponseBody(context.Background(), &policy.ResponseContext{
 		SharedContext: &policy.SharedContext{},
 		ResponseBody:  &policy.Body{Content: []byte(`{"output":"malicious content"}`), Present: true},
 	}, nil)
@@ -378,7 +378,7 @@ func TestOnResponseBody_BlockReasonIsDirectionNeutral(t *testing.T) {
 		t.Fatalf("GetPolicy failed: %v", err)
 	}
 
-	action := p.(*TypesafeJevGuardrailPolicy).OnResponseBody(context.Background(), &policy.ResponseContext{
+	action := p.(*TypesafeJevContentSafetyPolicy).OnResponseBody(context.Background(), &policy.ResponseContext{
 		SharedContext: &policy.SharedContext{},
 		ResponseBody:  &policy.Body{Content: []byte(`{"output":"malicious content"}`), Present: true},
 	}, nil)
@@ -451,7 +451,7 @@ func TestOnRequestBody_PassthroughOnMissingAnswerWhenConfigured(t *testing.T) {
 		t.Fatalf("GetPolicy failed: %v", err)
 	}
 
-	action := p.(*TypesafeJevGuardrailPolicy).OnRequestBody(context.Background(), &policy.RequestContext{
+	action := p.(*TypesafeJevContentSafetyPolicy).OnRequestBody(context.Background(), &policy.RequestContext{
 		SharedContext: &policy.SharedContext{},
 		Body:          &policy.Body{Content: []byte(`{"input":"hello"}`), Present: true},
 	}, nil)
