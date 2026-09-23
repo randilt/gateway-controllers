@@ -1,4 +1,4 @@
-module github.com/wso2/gateway-controllers/policies/jev-guardrail
+module github.com/randilt/gateway-controllers/policies/jev-guardrail
 
 go 1.26.1
 
