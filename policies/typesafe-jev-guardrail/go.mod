@@ -1,4 +1,4 @@
-module github.com/randilt/gateway-controllers/policies/typesafe-jev-guardrail
+module github.com/wso2/gateway-controllers/policies/typesafe-jev-guardrail
 
 go 1.26.1
 
