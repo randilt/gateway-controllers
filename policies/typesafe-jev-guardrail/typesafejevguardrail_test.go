@@ -345,3 +345,118 @@ func TestOnResponseBody_UsesResponseParams(t *testing.T) {
 		t.Fatalf("expected response-phase block, got: %+v", action)
 	}
 }
+
+func TestParsePhaseParams_RejectsDuplicateQuestionKeys(t *testing.T) {
+	params := map[string]interface{}{
+		"questions": []interface{}{
+			map[string]interface{}{"key": "jailbreak", "type": "noul", "instructions": "a", "threshold": 0.7},
+			map[string]interface{}{"key": "jailbreak", "type": "noul", "instructions": "b", "threshold": 0.5},
+		},
+	}
+	_, err := parsePhaseParams(params, requestDefaultJSONPath)
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected a duplicate-key validation error, got: %v", err)
+	}
+}
+
+func TestOnResponseBody_BlockReasonIsDirectionNeutral(t *testing.T) {
+	server := mockJevServer(t, map[string]float64{"jailbreak": 0.9}, nil)
+	defer server.Close()
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"apiKey":  "test-key",
+		"baseURL": server.URL,
+		"response": map[string]interface{}{
+			"jsonPath":       "$.output",
+			"showAssessment": true,
+			"questions": []interface{}{
+				map[string]interface{}{"key": "jailbreak", "type": "noul", "instructions": "...", "threshold": 0.7},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.(*TypesafeJevGuardrailPolicy).OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext: &policy.SharedContext{},
+		ResponseBody:  &policy.Body{Content: []byte(`{"output":"malicious content"}`), Present: true},
+	}, nil)
+
+	mods, blocked := action.(policy.DownstreamResponseModifications)
+	if !blocked {
+		t.Fatalf("expected response-phase block, got: %+v", action)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(mods.Body, &body); err != nil {
+		t.Fatalf("failed to parse block body: %v", err)
+	}
+	message := body["message"].(map[string]interface{})
+	reason, _ := message["actionReason"].(string)
+	if strings.Contains(reason, "Request") {
+		t.Fatalf("expected direction-neutral response wording, got: %q", reason)
+	}
+	if !strings.Contains(reason, "Response") {
+		t.Fatalf("expected response-phase wording to mention 'Response', got: %q", reason)
+	}
+}
+
+// mockJevServerMissingAnswer returns a server whose "answers" object never
+// includes the configured question at all, simulating a malformed/partial
+// Jev response distinct from a transport-level failure.
+func mockJevServerMissingAnswer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"model":   "jev-latest",
+			"answers": map[string]interface{}{},
+		})
+	}))
+}
+
+func TestOnRequestBody_FailsClosedOnMissingAnswer(t *testing.T) {
+	server := mockJevServerMissingAnswer(t)
+	defer server.Close()
+
+	p := newTestPolicy(t, server.URL, []interface{}{
+		map[string]interface{}{"key": "jailbreak", "type": "noul", "instructions": "...", "threshold": 0.7},
+	})
+
+	action := p.OnRequestBody(context.Background(), &policy.RequestContext{
+		SharedContext: &policy.SharedContext{},
+		Body:          &policy.Body{Content: []byte(`{"input":"hello"}`), Present: true},
+	}, nil)
+
+	if _, blocked := action.(policy.ImmediateResponse); !blocked {
+		t.Fatalf("expected fail-closed block when Jev's response omits a configured question's answer, got passthrough")
+	}
+}
+
+func TestOnRequestBody_PassthroughOnMissingAnswerWhenConfigured(t *testing.T) {
+	server := mockJevServerMissingAnswer(t)
+	defer server.Close()
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"apiKey":  "test-key",
+		"baseURL": server.URL,
+		"request": map[string]interface{}{
+			"jsonPath":           "$.input",
+			"passthroughOnError": true,
+			"questions": []interface{}{
+				map[string]interface{}{"key": "jailbreak", "type": "noul", "instructions": "...", "threshold": 0.7},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.(*TypesafeJevGuardrailPolicy).OnRequestBody(context.Background(), &policy.RequestContext{
+		SharedContext: &policy.SharedContext{},
+		Body:          &policy.Body{Content: []byte(`{"input":"hello"}`), Present: true},
+	}, nil)
+
+	if _, blocked := action.(policy.ImmediateResponse); blocked {
+		t.Fatalf("expected passthrough on missing answer with passthroughOnError=true, got blocked")
+	}
+}

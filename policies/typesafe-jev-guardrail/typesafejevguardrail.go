@@ -255,32 +255,37 @@ func (p *TypesafeJevGuardrailPolicy) screen(ctx context.Context, payload []byte,
 	var failed []map[string]interface{}
 	for _, q := range params.Questions {
 		raw, ok := answers[q.Key]
+		var value float64
+		var err error
 		if !ok {
-			continue
+			err = fmt.Errorf("Jev response missing answer for question %q", q.Key)
+		} else {
+			switch q.Type {
+			case questionTypeNoul:
+				value, err = decodeNoulAnswer(raw)
+			case questionTypeScore:
+				value, err = decodeScoreAnswer(raw)
+			}
 		}
-		switch q.Type {
-		case questionTypeNoul:
-			value, err := decodeNoulAnswer(raw)
-			if err != nil {
-				slog.Debug("TypesafeJevGuardrail: failed to decode Noul answer", "question", q.Key, "error", err)
-				continue
+		if err != nil {
+			// An incomplete or malformed Jev response is a failure of the guardrail
+			// check itself, not a "this question happened not to fire" — it must go
+			// through the same passthroughOnError gate as a Jev API error, or a
+			// fail-closed operator's request would be silently let through on a
+			// partial response.
+			if params.PassthroughOnError {
+				slog.Debug("TypesafeJevGuardrail: failed to process answer, passthrough enabled",
+					"question", q.Key, "error", err, "isResponse", isResponse)
+				return passthrough()
 			}
-			if value >= q.Threshold {
-				failed = append(failed, map[string]interface{}{
-					"question": q.Key, "type": q.Type, "value": value, "threshold": q.Threshold,
-				})
-			}
-		case questionTypeScore:
-			value, err := decodeScoreAnswer(raw)
-			if err != nil {
-				slog.Debug("TypesafeJevGuardrail: failed to decode Score answer", "question", q.Key, "error", err)
-				continue
-			}
-			if value >= q.Threshold {
-				failed = append(failed, map[string]interface{}{
-					"question": q.Key, "type": q.Type, "value": value, "threshold": q.Threshold,
-				})
-			}
+			slog.Debug("TypesafeJevGuardrail: failed to process answer, failing closed",
+				"question", q.Key, "error", err, "isResponse", isResponse)
+			return p.buildErrorResponse("Error processing Jev response", nil, isResponse, params.ShowAssessment)
+		}
+		if value >= q.Threshold {
+			failed = append(failed, map[string]interface{}{
+				"question": q.Key, "type": q.Type, "value": value, "threshold": q.Threshold,
+			})
 		}
 	}
 
@@ -304,6 +309,8 @@ func (p *TypesafeJevGuardrailPolicy) buildErrorResponse(reason string, failed []
 	}
 	if failed == nil {
 		assessment["actionReason"] = reason
+	} else if isResponse {
+		assessment["actionReason"] = "Response failed one or more Jev guardrail checks."
 	} else {
 		assessment["actionReason"] = "Request failed one or more Jev guardrail checks."
 	}
@@ -405,24 +412,36 @@ func (p *TypesafeJevGuardrailPolicy) callJev(ctx context.Context, state string, 
 	return parsed.Answers, nil
 }
 
+// decodeNoulAnswer requires the "noul" field to actually be present: a
+// pointer field distinguishes "absent" from "present and 0", since a
+// malformed Jev response missing this field must not silently decode as a
+// confident non-violation.
 func decodeNoulAnswer(raw json.RawMessage) (float64, error) {
 	var a struct {
-		Noul float64 `json:"noul"`
+		Noul *float64 `json:"noul"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return 0, err
 	}
-	return a.Noul, nil
+	if a.Noul == nil {
+		return 0, fmt.Errorf("answer missing 'noul' field")
+	}
+	return *a.Noul, nil
 }
 
+// decodeScoreAnswer mirrors decodeNoulAnswer's absent-field handling for the
+// "score" field.
 func decodeScoreAnswer(raw json.RawMessage) (float64, error) {
 	var a struct {
-		Score float64 `json:"score"`
+		Score *float64 `json:"score"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return 0, err
 	}
-	return a.Score, nil
+	if a.Score == nil {
+		return 0, fmt.Errorf("answer missing 'score' field")
+	}
+	return *a.Score, nil
 }
 
 // --- Parameter parsing ---
@@ -490,6 +509,7 @@ func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (ty
 	}
 
 	questions := make([]guardrailQuestion, 0, len(questionsList))
+	seenKeys := make(map[string]bool, len(questionsList))
 	for i, item := range questionsList {
 		qMap, ok := item.(map[string]interface{})
 		if !ok {
@@ -499,6 +519,10 @@ func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (ty
 		if err != nil {
 			return result, err
 		}
+		if seenKeys[q.Key] {
+			return result, fmt.Errorf("'questions[%d].key' %q is a duplicate; question keys must be unique", i, q.Key)
+		}
+		seenKeys[q.Key] = true
 		questions = append(questions, q)
 	}
 	result.Questions = questions
