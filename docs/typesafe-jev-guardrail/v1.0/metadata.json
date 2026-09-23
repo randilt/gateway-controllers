@@ -1,6 +1,6 @@
 {
-  "name": "jev-guardrail",
-  "displayName": "Jev Guardrail",
+  "name": "typesafe-jev-guardrail",
+  "displayName": "TypeSafe Jev Guardrail",
   "version": "1.0",
   "provider": "WSO2",
   "categories": [

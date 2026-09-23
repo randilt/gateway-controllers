@@ -1,4 +1,4 @@
-name: jev-guardrail
+name: typesafe-jev-guardrail
 version: v1.0.0
 description: |
   Screens request and/or response content using TypeSafe AI's Jev "System One"
