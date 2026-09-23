@@ -3,8 +3,9 @@ version: v1.0.0
 description: |
   Screens request and/or response content using TypeSafe AI's Jev "System One"
   model. Sends a configurable battery of typed questions (calibrated yes/no,
-  or a position on an operator-defined scale) about the extracted text, and
-  blocks when any question's answer crosses its threshold.
+  a position on an operator-defined scale, or a choice between
+  operator-defined options) about the extracted text, and blocks when any
+  question's answer crosses its threshold, or records it in monitor mode.
 
 parameters:
   type: object
@@ -18,7 +19,9 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            Extract text with JSONPath for screening.
+            Extract text with JSONPath for screening. When the value is an
+            array of multimodal content parts, only the text parts are
+            screened.
           default: "$.messages[-1].content"
         questions:
           type: array
@@ -39,8 +42,8 @@ parameters:
                 description: Unique identifier for this question, used in the block assessment.
               type:
                 type: string
-                enum: [noul, score]
-                description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'."
+                enum: [noul, score, choice]
+                description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
               instructions:
                 type: string
                 description: The question to ask Jev about the extracted text.
@@ -48,10 +51,22 @@ parameters:
                 type: array
                 items:
                   type: string
-                description: Required for type 'score'. Ordered scale descriptions, lowest first (e.g. index 0 = no harm).
+                description: |
+                  Required for types 'score' and 'choice'. For 'score': 2-10 ordered
+                  scale descriptions, lowest first (e.g. index 0 = no harm). For
+                  'choice': 2-255 options to choose between; add an "other" option
+                  when the list might not cover every input.
+              blockOn:
+                type: array
+                items:
+                  type: string
+                description: Required for type 'choice'. The 'criteria' options that count towards blocking.
               threshold:
                 type: number
-                description: "For 'noul': minimum probability (0-1) to block. For 'score': minimum scale position to block."
+                description: |
+                  For 'noul': minimum probability (0-1) to block. For 'score':
+                  minimum scale position to block. For 'choice': minimum combined
+                  probability (0-1) of the 'blockOn' options to block.
           default:
             - key: jailbreak
               type: noul
@@ -74,6 +89,26 @@ parameters:
                 - "Serious: complying enables real wrongdoing or gives unsafe personal advice."
                 - "Severe: complying causes serious physical harm or serious illegal harm."
               threshold: 2
+        mode:
+          type: string
+          enum: [enforce, monitor]
+          x-wso2-policy-advanced-param: false
+          description: |
+            'enforce' (default) blocks when a question crosses its threshold.
+            'monitor' never blocks: it lets traffic through and records the
+            hit in analytics (isGuardrailHit, guardrailName) and the flagged
+            questions in request metadata. Use it to tune thresholds on real
+            traffic before enforcing.
+          default: enforce
+        timeout:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Maximum time to wait for Jev, as a Go duration string (for
+            example "5s" or "1500ms"), up to "30s". Includes one retry when
+            Jev is rate limited or overloaded. On timeout, passthroughOnError
+            decides whether traffic continues.
+          default: "5s"
         passthroughOnError:
           type: boolean
           x-wso2-policy-advanced-param: true
@@ -93,7 +128,11 @@ parameters:
     response:
       type: object
       x-wso2-policy-advanced-param: false
-      description: Specifies Jev content safety settings for response payloads.
+      description: |
+        Specifies Jev content safety settings for response payloads.
+        Configuring response screening disables streaming on this route:
+        Jev screens the complete reply, so streamed (stream: true) responses
+        are buffered and delivered to the client in one piece once screened.
       properties:
         jsonPath:
           type: string
@@ -101,6 +140,15 @@ parameters:
           description: |
             Extract text with JSONPath for screening.
           default: "$.choices[0].message.content"
+        streamingJsonPath:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPath used to extract text from each event of a streamed
+            (stream: true) response, which is reassembled into the complete
+            reply before screening. Defaults to the OpenAI SSE delta content
+            path.
+          default: "$.choices[0].delta.content"
         questions:
           type: array
           x-wso2-policy-advanced-param: false
@@ -118,8 +166,8 @@ parameters:
                 description: Unique identifier for this question, used in the block assessment.
               type:
                 type: string
-                enum: [noul, score]
-                description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'."
+                enum: [noul, score, choice]
+                description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
               instructions:
                 type: string
                 description: The question to ask Jev about the extracted text.
@@ -127,10 +175,22 @@ parameters:
                 type: array
                 items:
                   type: string
-                description: Required for type 'score'. Ordered scale descriptions, lowest first (e.g. index 0 = no harm).
+                description: |
+                  Required for types 'score' and 'choice'. For 'score': 2-10 ordered
+                  scale descriptions, lowest first (e.g. index 0 = no harm). For
+                  'choice': 2-255 options to choose between; add an "other" option
+                  when the list might not cover every input.
+              blockOn:
+                type: array
+                items:
+                  type: string
+                description: Required for type 'choice'. The 'criteria' options that count towards blocking.
               threshold:
                 type: number
-                description: "For 'noul': minimum probability (0-1) to block. For 'score': minimum scale position to block."
+                description: |
+                  For 'noul': minimum probability (0-1) to block. For 'score':
+                  minimum scale position to block. For 'choice': minimum combined
+                  probability (0-1) of the 'blockOn' options to block.
           default:
             - key: jailbreak
               type: noul
@@ -153,6 +213,26 @@ parameters:
                 - "Serious: complying enables real wrongdoing or gives unsafe personal advice."
                 - "Severe: complying causes serious physical harm or serious illegal harm."
               threshold: 2
+        mode:
+          type: string
+          enum: [enforce, monitor]
+          x-wso2-policy-advanced-param: false
+          description: |
+            'enforce' (default) blocks when a question crosses its threshold.
+            'monitor' never blocks: it lets traffic through and records the
+            hit in analytics (isGuardrailHit, guardrailName) and the flagged
+            questions in request metadata. Use it to tune thresholds on real
+            traffic before enforcing.
+          default: enforce
+        timeout:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Maximum time to wait for Jev, as a Go duration string (for
+            example "5s" or "1500ms"), up to "30s". Includes one retry when
+            Jev is rate limited or overloaded. On timeout, passthroughOnError
+            decides whether traffic continues.
+          default: "5s"
         passthroughOnError:
           type: boolean
           x-wso2-policy-advanced-param: true

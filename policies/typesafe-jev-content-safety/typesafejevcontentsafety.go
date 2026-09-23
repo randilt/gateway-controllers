@@ -19,9 +19,11 @@
 // AI's Jev "System One" model (https://typesafe.ai). Jev answers typed
 // questions about a piece of text rather than generating text itself: a
 // Noul question returns a calibrated yes/no probability, a Score question
-// returns a position on an operator-defined scale. This policy sends a
-// configurable battery of such questions to Jev and blocks the request (or
-// response) when any question's answer crosses its threshold.
+// returns a position on an operator-defined scale, and a Choice question
+// returns a probability distribution over operator-defined options. This
+// policy sends a configurable battery of such questions to Jev and blocks
+// the request (or response) when any question's answer crosses its
+// threshold — or, in monitor mode, only records that it would have.
 //
 // The question battery is entirely configurable per policy attachment (the
 // "questions" parameter) — there is no fixed set of hazards baked into the
@@ -39,6 +41,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,26 +50,50 @@ import (
 )
 
 const (
-	GuardrailErrorCode      = 422
-	defaultBaseURL          = "https://api.typesafe.ai"
-	defaultModel            = "jev-latest"
-	requestTimeout          = 30 * time.Second
-	requestDefaultJSONPath  = "$.messages[-1].content"
-	responseDefaultJSONPath = "$.choices[0].message.content"
+	GuardrailErrorCode       = 422
+	guardrailName            = "TypesafeJevContentSafety"
+	defaultBaseURL           = "https://api.typesafe.ai"
+	defaultModel             = "jev-latest"
+	defaultTimeout           = 5 * time.Second
+	maxTimeout               = 30 * time.Second
+	requestDefaultJSONPath   = "$.messages[-1].content"
+	responseDefaultJSONPath  = "$.choices[0].message.content"
+	streamingDefaultJSONPath = "$.choices[0].delta.content"
 
-	questionTypeNoul  = "noul"
-	questionTypeScore = "score"
+	questionTypeNoul   = "noul"
+	questionTypeScore  = "score"
+	questionTypeChoice = "choice"
+
+	// Jev's documented limits on criteria size per question type.
+	maxScoreLevels  = 10
+	maxChoiceOption = 255
+
+	modeEnforce = "enforce"
+	modeMonitor = "monitor"
+
+	// Jev returns 429 when rate limited and 529 when overloaded; both are
+	// documented as retryable. One retry with a short backoff, bounded by the
+	// same per-call timeout as the first attempt.
+	statusJevOverloaded = 529
+	retryBackoff        = 250 * time.Millisecond
+
+	// SharedContext.Metadata keys. Suffixed with the phase ("request" or
+	// "response") so both phases can record without overwriting each other.
+	metaKeyAssessmentsPrefix = "typesafe-jev-content-safety:assessments:"
+	metaKeyUsagePrefix       = "typesafe-jev-content-safety:usage:"
 )
 
 // guardrailQuestion is one entry in a configured question battery. Criteria
-// only applies to (and is required for) Score questions; Threshold is
-// compared against the Noul probability or the Score value, whichever type
-// this question is.
+// applies to (and is required for) Score and Choice questions; BlockOn only
+// applies to Choice. Threshold is compared against the Noul probability, the
+// Score value, or the summed probability of the BlockOn options, depending
+// on the question's type.
 type guardrailQuestion struct {
 	Key          string
 	Type         string
 	Instructions string
 	Criteria     []string
+	BlockOn      []string
 	Threshold    float64
 }
 
@@ -124,7 +151,10 @@ type TypesafeJevContentSafetyPolicy struct {
 
 type typesafeJevContentSafetyPhaseParams struct {
 	JSONPath           string
+	StreamingJSONPath  string
 	Questions          []guardrailQuestion
+	Mode               string
+	Timeout            time.Duration
 	PassthroughOnError bool
 	ShowAssessment     bool
 }
@@ -139,11 +169,13 @@ func GetPolicy(
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
+	// No client-level timeout: each Jev call is bounded by its phase's
+	// configured timeout via context instead.
 	p := &TypesafeJevContentSafetyPolicy{
 		apiKey:  apiKey,
 		baseURL: stringParamOrDefault(params, "baseURL", defaultBaseURL),
 		model:   stringParamOrDefault(params, "model", defaultModel),
-		client:  &http.Client{Timeout: requestTimeout},
+		client:  &http.Client{},
 	}
 
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
@@ -174,17 +206,23 @@ func GetPolicy(
 	return p, nil
 }
 
-// Mode always buffers both bodies, matching the other dual-phase guardrails
-// in this repo (e.g. azure-content-safety-content-moderation): a phase with
-// no configured params is a no-op in OnRequestBody/OnResponseBody rather
-// than being skipped at the Mode level.
+// Mode buffers only the phases that are configured. Buffering the response
+// body disables streaming for the whole route, so a request-only attachment
+// must skip the response body to leave streaming intact.
 func (p *TypesafeJevContentSafetyPolicy) Mode() policy.ProcessingMode {
-	return policy.ProcessingMode{
+	mode := policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeSkip,
 	}
+	if p.hasRequestParams {
+		mode.RequestBodyMode = policy.BodyModeBuffer
+	}
+	if p.hasResponseParams {
+		mode.ResponseBodyMode = policy.BodyModeBuffer
+	}
+	return mode
 }
 
 func (p *TypesafeJevContentSafetyPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
@@ -195,7 +233,7 @@ func (p *TypesafeJevContentSafetyPolicy) OnRequestBody(ctx context.Context, reqC
 	if reqCtx.Body != nil {
 		content = reqCtx.Body.Content
 	}
-	return p.screen(ctx, content, p.requestParams, false).(policy.RequestAction)
+	return p.screen(ctx, reqCtx.SharedContext, content, p.requestParams, false).(policy.RequestAction)
 }
 
 func (p *TypesafeJevContentSafetyPolicy) OnResponseBody(ctx context.Context, respCtx *policy.ResponseContext, _ map[string]interface{}) policy.ResponseAction {
@@ -206,101 +244,158 @@ func (p *TypesafeJevContentSafetyPolicy) OnResponseBody(ctx context.Context, res
 	if respCtx.ResponseBody != nil {
 		content = respCtx.ResponseBody.Content
 	}
-	return p.screen(ctx, content, p.responseParams, true).(policy.ResponseAction)
+	return p.screen(ctx, respCtx.SharedContext, content, p.responseParams, true).(policy.ResponseAction)
 }
 
 // screen extracts the target text, asks Jev the configured questions, and
 // returns either a passthrough action or a blocking one. Returns interface{}
 // so one implementation serves both phases, exactly as
 // azure-content-safety-content-moderation.validatePayload does.
-func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, payload []byte, params typesafeJevContentSafetyPhaseParams, isResponse bool) interface{} {
-	passthrough := func() interface{} {
+func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *policy.SharedContext, payload []byte, params typesafeJevContentSafetyPhaseParams, isResponse bool) interface{} {
+	phase := "request"
+	if isResponse {
+		phase = "response"
+	}
+	passthrough := func(analyticsMetadata map[string]interface{}) interface{} {
 		if isResponse {
-			return policy.DownstreamResponseModifications{}
+			return policy.DownstreamResponseModifications{AnalyticsMetadata: analyticsMetadata}
 		}
-		return policy.UpstreamRequestModifications{}
+		return policy.UpstreamRequestModifications{AnalyticsMetadata: analyticsMetadata}
+	}
+	// failure handles an error in the check itself (not a violation). Monitor
+	// mode never blocks, so it always passes through regardless of
+	// passthroughOnError.
+	failure := func(reason string, err error) interface{} {
+		if params.Mode == modeMonitor || params.PassthroughOnError {
+			slog.Debug("TypesafeJevContentSafety: check failed, passing through",
+				"reason", reason, "error", err, "mode", params.Mode, "phase", phase)
+			return passthrough(nil)
+		}
+		slog.Debug("TypesafeJevContentSafety: check failed, failing closed",
+			"reason", reason, "error", err, "phase", phase)
+		return p.buildErrorResponse(reason, nil, isResponse, params.ShowAssessment)
 	}
 
 	if len(params.Questions) == 0 {
-		slog.Debug("TypesafeJevContentSafety: No questions configured, passing through", "isResponse", isResponse)
-		return passthrough()
+		slog.Debug("TypesafeJevContentSafety: No questions configured, passing through", "phase", phase)
+		return passthrough(nil)
 	}
 	if payload == nil {
-		return passthrough()
+		return passthrough(nil)
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JSONPath)
+	extractedValue, err := extractText(payload, params, isResponse)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("TypesafeJevContentSafety: JSONPath extraction error, passthrough enabled",
-				"jsonPath", params.JSONPath, "error", err, "isResponse", isResponse)
-			return passthrough()
-		}
-		return p.buildErrorResponse("Error extracting value from JSONPath", nil, isResponse, params.ShowAssessment)
+		return failure("Error extracting value from JSONPath", err)
 	}
 	extractedValue = strings.TrimSpace(extractedValue)
 	if extractedValue == "" {
-		return passthrough()
+		return passthrough(nil)
 	}
 
-	answers, err := p.callJev(ctx, extractedValue, params.Questions)
+	answers, usage, err := p.callJev(ctx, extractedValue, params.Questions, params.Timeout)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("TypesafeJevContentSafety: Jev API call error, passthrough enabled", "error", err, "isResponse", isResponse)
-			return passthrough()
-		}
-		return p.buildErrorResponse("Error calling Jev API", nil, isResponse, params.ShowAssessment)
+		return failure("Error calling Jev API", err)
+	}
+	if usage != nil {
+		setMetadata(shared, metaKeyUsagePrefix+phase, map[string]interface{}{
+			"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens,
+		})
 	}
 
 	var failed []map[string]interface{}
 	for _, q := range params.Questions {
 		raw, ok := answers[q.Key]
-		var value float64
-		var err error
 		if !ok {
-			err = fmt.Errorf("Jev response missing answer for question %q", q.Key)
-		} else {
-			switch q.Type {
-			case questionTypeNoul:
-				value, err = decodeNoulAnswer(raw)
-			case questionTypeScore:
-				value, err = decodeScoreAnswer(raw)
-			}
-		}
-		if err != nil {
-			// An incomplete or malformed Jev response is a failure of the guardrail
-			// check itself, not a "this question happened not to fire" — it must go
-			// through the same passthroughOnError gate as a Jev API error, or a
+			// An incomplete or malformed Jev response is a failure of the check
+			// itself, not a "this question happened not to fire" — it must go
+			// through the same failure gate as a Jev API error, or a
 			// fail-closed operator's request would be silently let through on a
 			// partial response.
-			if params.PassthroughOnError {
-				slog.Debug("TypesafeJevContentSafety: failed to process answer, passthrough enabled",
-					"question", q.Key, "error", err, "isResponse", isResponse)
-				return passthrough()
-			}
-			slog.Debug("TypesafeJevContentSafety: failed to process answer, failing closed",
-				"question", q.Key, "error", err, "isResponse", isResponse)
-			return p.buildErrorResponse("Error processing Jev response", nil, isResponse, params.ShowAssessment)
+			return failure("Error processing Jev response", fmt.Errorf("Jev response missing answer for question %q", q.Key))
 		}
-		if value >= q.Threshold {
-			failed = append(failed, map[string]interface{}{
-				"question": q.Key, "type": q.Type, "value": value, "threshold": q.Threshold,
-			})
+		assessment, err := evaluateAnswer(q, raw)
+		if err != nil {
+			return failure("Error processing Jev response", fmt.Errorf("question %q: %w", q.Key, err))
+		}
+		if assessment != nil {
+			failed = append(failed, assessment)
 		}
 	}
 
-	if len(failed) > 0 {
-		slog.Debug("TypesafeJevContentSafety: violation detected", "failedQuestions", failed, "isResponse", isResponse)
-		return p.buildErrorResponse("Request failed one or more Jev content safety checks", failed, isResponse, params.ShowAssessment)
+	if len(failed) == 0 {
+		return passthrough(nil)
 	}
 
-	return passthrough()
+	setMetadata(shared, metaKeyAssessmentsPrefix+phase, failed)
+	analyticsMetadata := map[string]interface{}{
+		"isGuardrailHit": true,
+		"guardrailName":  guardrailName,
+	}
+
+	if params.Mode == modeMonitor {
+		slog.Info("TypesafeJevContentSafety: violation detected (monitor mode, not blocking)",
+			"failedQuestions", failed, "phase", phase)
+		return passthrough(analyticsMetadata)
+	}
+
+	slog.Debug("TypesafeJevContentSafety: violation detected", "failedQuestions", failed, "phase", phase)
+	return p.buildErrorResponse("Request failed one or more Jev content safety checks", failed, isResponse, params.ShowAssessment)
+}
+
+// evaluateAnswer decodes one question's answer and returns its assessment
+// entry when the answer is at or above the question's threshold, or nil when
+// it isn't.
+func evaluateAnswer(q guardrailQuestion, raw json.RawMessage) (map[string]interface{}, error) {
+	assessment := map[string]interface{}{
+		"question": q.Key, "type": q.Type, "threshold": q.Threshold,
+	}
+	var value float64
+	switch q.Type {
+	case questionTypeNoul:
+		v, err := decodeNoulAnswer(raw)
+		if err != nil {
+			return nil, err
+		}
+		value = v
+	case questionTypeScore:
+		a, err := decodeScoreAnswer(raw)
+		if err != nil {
+			return nil, err
+		}
+		value = a.Score
+		if a.Confidence != nil {
+			assessment["confidence"] = *a.Confidence
+		}
+	case questionTypeChoice:
+		a, err := decodeChoiceAnswer(raw)
+		if err != nil {
+			return nil, err
+		}
+		// The blocking value is the total probability mass on the BlockOn
+		// options, not just whether one of them won the argmax — a 0.45/0.45
+		// split between two blocked options is still a 0.9 "blocked" answer.
+		for _, option := range q.BlockOn {
+			value += a.Probabilities[option]
+		}
+		assessment["choice"] = a.Choice
+		if a.Confidence != nil {
+			assessment["confidence"] = *a.Confidence
+		}
+	default:
+		return nil, fmt.Errorf("unsupported question type %q", q.Type)
+	}
+	if value < q.Threshold {
+		return nil, nil
+	}
+	assessment["value"] = value
+	return assessment, nil
 }
 
 func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool) interface{} {
 	assessment := map[string]interface{}{
 		"action":               "GUARDRAIL_INTERVENED",
-		"interveningGuardrail": "TypesafeJevContentSafety",
+		"interveningGuardrail": guardrailName,
 	}
 	if isResponse {
 		assessment["direction"] = "RESPONSE"
@@ -320,7 +415,7 @@ func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, faile
 
 	analyticsMetadata := map[string]interface{}{
 		"isGuardrailHit": true,
-		"guardrailName":  "TypesafeJevContentSafety",
+		"guardrailName":  guardrailName,
 	}
 
 	responseBody := map[string]interface{}{
@@ -349,12 +444,127 @@ func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, faile
 	}
 }
 
+// setMetadata records a value in SharedContext.Metadata, where later
+// policies and the traffic-logging analytics publisher can read it.
+func setMetadata(shared *policy.SharedContext, key string, value interface{}) {
+	if shared == nil {
+		return
+	}
+	if shared.Metadata == nil {
+		shared.Metadata = make(map[string]interface{})
+	}
+	shared.Metadata[key] = value
+}
+
+// --- Text extraction ---
+
+// extractText returns the text to screen from a request or response body.
+//
+// A buffered response to a "stream": true request arrives as the complete
+// SSE event stream rather than a single JSON document, so it is reassembled
+// from each event's streamingJsonPath fragment before screening.
+func extractText(payload []byte, params typesafeJevContentSafetyPhaseParams, isResponse bool) (string, error) {
+	if isResponse && isSSE(payload) {
+		return extractSSEText(payload, params.StreamingJSONPath), nil
+	}
+	if params.JSONPath == "" {
+		return string(payload), nil
+	}
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(payload, &jsonData); err != nil {
+		return "", err
+	}
+	value, err := utils.ExtractValueFromJsonpath(jsonData, params.JSONPath)
+	if err != nil {
+		return "", err
+	}
+	return textFromValue(value)
+}
+
+// textFromValue converts a JSONPath result to screenable text. A null value
+// (e.g. a tool-call-only reply with "content": null) has nothing to screen.
+// An array is treated as OpenAI-style multimodal content parts: text parts
+// are joined and non-text parts (images, audio) are skipped, since they
+// can't be screened as text and would only consume Jev's token budget.
+func textFromValue(value interface{}) (string, error) {
+	switch v := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return v, nil
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case []interface{}:
+		return textFromContentParts(v)
+	default:
+		return "", fmt.Errorf("value at JSONPath is not a string, number, or content-part array")
+	}
+}
+
+func textFromContentParts(parts []interface{}) (string, error) {
+	var texts []string
+	for i, item := range parts {
+		switch part := item.(type) {
+		case string:
+			texts = append(texts, part)
+		case map[string]interface{}:
+			if text, ok := part["text"].(string); ok {
+				texts = append(texts, text)
+				continue
+			}
+			// A typed non-text part (image_url, input_audio, ...) is skipped.
+			// An untyped object means the JSONPath points at something other
+			// than content parts (e.g. the whole messages array), which must
+			// not silently screen as empty.
+			if _, typed := part["type"].(string); !typed {
+				return "", fmt.Errorf("array element %d at JSONPath is not a content part", i)
+			}
+		default:
+			return "", fmt.Errorf("array element %d at JSONPath is not a content part", i)
+		}
+	}
+	return strings.Join(texts, "\n"), nil
+}
+
+// isSSE reports whether payload looks like a server-sent event stream.
+func isSSE(payload []byte) bool {
+	trimmed := bytes.TrimLeft(payload, " \t\r\n")
+	return bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:"))
+}
+
+// extractSSEText concatenates the streamingJsonPath fragment of every SSE
+// data event. Events where the path doesn't resolve to a string (role-only
+// deltas, finish events, usage events) contribute nothing.
+func extractSSEText(payload []byte, streamingJSONPath string) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(string(payload), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var event map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if value, err := utils.ExtractValueFromJsonpath(event, streamingJSONPath); err == nil {
+			if text, ok := value.(string); ok {
+				sb.WriteString(text)
+			}
+		}
+	}
+	return sb.String()
+}
+
 // --- Jev API client ---
 
 type jevQuestionPayload struct {
-	Type         string   `json:"type"`
-	Instructions string   `json:"instructions"`
-	Criteria     []string `json:"criteria,omitempty"`
+	Type         string      `json:"type"`
+	Instructions string      `json:"instructions"`
+	Criteria     interface{} `json:"criteria,omitempty"`
 }
 
 type jevSystemOneRequest struct {
@@ -363,53 +573,91 @@ type jevSystemOneRequest struct {
 	Questions map[string]jevQuestionPayload `json:"questions"`
 }
 
-type jevSystemOneResponse struct {
-	Answers map[string]json.RawMessage `json:"answers"`
+type jevUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }
 
-func (p *TypesafeJevContentSafetyPolicy) callJev(ctx context.Context, state string, questions []guardrailQuestion) (map[string]json.RawMessage, error) {
+type jevSystemOneResponse struct {
+	Answers map[string]json.RawMessage `json:"answers"`
+	Usage   *jevUsage                  `json:"usage"`
+}
+
+func (p *TypesafeJevContentSafetyPolicy) callJev(ctx context.Context, state string, questions []guardrailQuestion, timeout time.Duration) (map[string]json.RawMessage, *jevUsage, error) {
 	questionMap := make(map[string]jevQuestionPayload, len(questions))
 	for _, q := range questions {
-		questionMap[q.Key] = jevQuestionPayload{
-			Type:         q.Type,
-			Instructions: q.Instructions,
-			Criteria:     q.Criteria,
+		payload := jevQuestionPayload{Type: q.Type, Instructions: q.Instructions}
+		switch q.Type {
+		case questionTypeScore:
+			payload.Criteria = q.Criteria
+		case questionTypeChoice:
+			// Jev's Choice criteria is a map of option id -> description; a
+			// null description means the id itself is the description.
+			options := make(map[string]*string, len(q.Criteria))
+			for _, option := range q.Criteria {
+				options[option] = nil
+			}
+			payload.Criteria = options
 		}
+		questionMap[q.Key] = payload
 	}
 
 	reqBody := jevSystemOneRequest{State: state, Model: p.model, Questions: questionMap}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal Jev request: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal Jev request: %w", err)
 	}
 
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	status, body, err := p.postSystemOne(ctx, payload)
+	if err == nil && (status == http.StatusTooManyRequests || status == statusJevOverloaded) {
+		slog.Debug("TypesafeJevContentSafety: Jev rate limited or overloaded, retrying once", "status", status)
+		select {
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("Jev API returned status %d and timed out before retry: %w", status, ctx.Err())
+		case <-time.After(retryBackoff):
+		}
+		status, body, err = p.postSystemOne(ctx, payload)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if status != http.StatusOK {
+		return nil, nil, fmt.Errorf("Jev API returned status %d: %s", status, string(body))
+	}
+
+	var parsed jevSystemOneResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode Jev response: %w", err)
+	}
+	return parsed.Answers, parsed.Usage, nil
+}
+
+func (p *TypesafeJevContentSafetyPolicy) postSystemOne(ctx context.Context, payload []byte) (int, []byte, error) {
 	url := strings.TrimSuffix(p.baseURL, "/") + "/v1/systemone"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Jev HTTP request: %w", err)
+		return 0, nil, fmt.Errorf("failed to create Jev HTTP request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("Jev HTTP request failed: %w", err)
+		return 0, nil, fmt.Errorf("Jev HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read Jev response: %w", err)
+		return 0, nil, fmt.Errorf("failed to read Jev response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Jev API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var parsed jevSystemOneResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to decode Jev response: %w", err)
-	}
-	return parsed.Answers, nil
+	return resp.StatusCode, body, nil
 }
 
 // decodeNoulAnswer requires the "noul" field to actually be present: a
@@ -429,19 +677,49 @@ func decodeNoulAnswer(raw json.RawMessage) (float64, error) {
 	return *a.Noul, nil
 }
 
+type scoreAnswer struct {
+	Score      float64
+	Confidence *float64
+}
+
 // decodeScoreAnswer mirrors decodeNoulAnswer's absent-field handling for the
-// "score" field.
-func decodeScoreAnswer(raw json.RawMessage) (float64, error) {
+// "score" field. Confidence is optional and only reported, never required.
+func decodeScoreAnswer(raw json.RawMessage) (scoreAnswer, error) {
 	var a struct {
-		Score *float64 `json:"score"`
+		Score      *float64 `json:"score"`
+		Confidence *float64 `json:"confidence"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
-		return 0, err
+		return scoreAnswer{}, err
 	}
 	if a.Score == nil {
-		return 0, fmt.Errorf("answer missing 'score' field")
+		return scoreAnswer{}, fmt.Errorf("answer missing 'score' field")
 	}
-	return *a.Score, nil
+	return scoreAnswer{Score: *a.Score, Confidence: a.Confidence}, nil
+}
+
+type choiceAnswer struct {
+	Choice        string
+	Probabilities map[string]float64
+	Confidence    *float64
+}
+
+// decodeChoiceAnswer requires "probabilities" to be present, since the
+// blocking value is computed from it; a missing distribution must not
+// decode as zero probability on every blocked option.
+func decodeChoiceAnswer(raw json.RawMessage) (choiceAnswer, error) {
+	var a struct {
+		Choice        string             `json:"choice"`
+		Probabilities map[string]float64 `json:"probabilities"`
+		Confidence    *float64           `json:"confidence"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return choiceAnswer{}, err
+	}
+	if a.Probabilities == nil {
+		return choiceAnswer{}, fmt.Errorf("answer missing 'probabilities' field")
+	}
+	return choiceAnswer{Choice: a.Choice, Probabilities: a.Probabilities, Confidence: a.Confidence}, nil
 }
 
 // --- Parameter parsing ---
@@ -468,7 +746,12 @@ func stringParamOrDefault(params map[string]interface{}, key, def string) string
 }
 
 func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (typesafeJevContentSafetyPhaseParams, error) {
-	result := typesafeJevContentSafetyPhaseParams{JSONPath: defaultJSONPath}
+	result := typesafeJevContentSafetyPhaseParams{
+		JSONPath:          defaultJSONPath,
+		StreamingJSONPath: streamingDefaultJSONPath,
+		Mode:              modeEnforce,
+		Timeout:           defaultTimeout,
+	}
 
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
 		jsonPath, ok := jsonPathRaw.(string)
@@ -476,6 +759,37 @@ func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (ty
 			return result, fmt.Errorf("'jsonPath' must be a string")
 		}
 		result.JSONPath = jsonPath
+	}
+
+	if streamingJSONPathRaw, ok := params["streamingJsonPath"]; ok {
+		streamingJSONPath, ok := streamingJSONPathRaw.(string)
+		if !ok || streamingJSONPath == "" {
+			return result, fmt.Errorf("'streamingJsonPath' must be a non-empty string")
+		}
+		result.StreamingJSONPath = streamingJSONPath
+	}
+
+	if modeRaw, ok := params["mode"]; ok {
+		mode, ok := modeRaw.(string)
+		if !ok || (mode != modeEnforce && mode != modeMonitor) {
+			return result, fmt.Errorf("'mode' must be '%s' or '%s'", modeEnforce, modeMonitor)
+		}
+		result.Mode = mode
+	}
+
+	if timeoutRaw, ok := params["timeout"]; ok {
+		timeoutStr, ok := timeoutRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'timeout' must be a duration string (e.g. \"5s\")")
+		}
+		timeout, err := time.ParseDuration(timeoutStr)
+		if err != nil {
+			return result, fmt.Errorf("'timeout' is not a valid duration: %w", err)
+		}
+		if timeout <= 0 || timeout > maxTimeout {
+			return result, fmt.Errorf("'timeout' must be greater than 0 and at most %s", maxTimeout)
+		}
+		result.Timeout = timeout
 	}
 
 	if passthroughRaw, ok := params["passthroughOnError"]; ok {
@@ -539,8 +853,8 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 	q.Key = key
 
 	qType, ok := qMap["type"].(string)
-	if !ok || (qType != questionTypeNoul && qType != questionTypeScore) {
-		return q, fmt.Errorf("'questions[%d].type' is required and must be 'noul' or 'score'", index)
+	if !ok || (qType != questionTypeNoul && qType != questionTypeScore && qType != questionTypeChoice) {
+		return q, fmt.Errorf("'questions[%d].type' is required and must be 'noul', 'score', or 'choice'", index)
 	}
 	q.Type = qType
 
@@ -556,23 +870,72 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 	}
 	q.Threshold = threshold
 
-	if qType == questionTypeScore {
-		criteriaRaw, ok := qMap["criteria"].([]interface{})
-		if !ok || len(criteriaRaw) < 2 {
-			return q, fmt.Errorf("'questions[%d].criteria' is required for type 'score' and must have at least 2 entries", index)
+	switch qType {
+	case questionTypeScore:
+		criteria, err := parseStringList(qMap["criteria"], fmt.Sprintf("questions[%d].criteria", index))
+		if err != nil {
+			return q, err
 		}
-		criteria := make([]string, 0, len(criteriaRaw))
-		for _, c := range criteriaRaw {
-			s, ok := c.(string)
-			if !ok {
-				return q, fmt.Errorf("'questions[%d].criteria' entries must be strings", index)
-			}
-			criteria = append(criteria, s)
+		if len(criteria) < 2 || len(criteria) > maxScoreLevels {
+			return q, fmt.Errorf("'questions[%d].criteria' is required for type 'score' and must have 2 to %d entries", index, maxScoreLevels)
 		}
 		q.Criteria = criteria
+	case questionTypeChoice:
+		criteria, err := parseStringList(qMap["criteria"], fmt.Sprintf("questions[%d].criteria", index))
+		if err != nil {
+			return q, err
+		}
+		if len(criteria) < 2 || len(criteria) > maxChoiceOption {
+			return q, fmt.Errorf("'questions[%d].criteria' is required for type 'choice' and must have 2 to %d entries", index, maxChoiceOption)
+		}
+		options := make(map[string]bool, len(criteria))
+		for _, option := range criteria {
+			if options[option] {
+				return q, fmt.Errorf("'questions[%d].criteria' has duplicate option %q", index, option)
+			}
+			options[option] = true
+		}
+		blockOn, err := parseStringList(qMap["blockOn"], fmt.Sprintf("questions[%d].blockOn", index))
+		if err != nil {
+			return q, err
+		}
+		if len(blockOn) == 0 {
+			return q, fmt.Errorf("'questions[%d].blockOn' is required for type 'choice' and must name at least one option", index)
+		}
+		for _, option := range blockOn {
+			if !options[option] {
+				return q, fmt.Errorf("'questions[%d].blockOn' option %q is not in criteria", index, option)
+			}
+		}
+		if threshold <= 0 || threshold > 1 {
+			return q, fmt.Errorf("'questions[%d].threshold' for type 'choice' must be a probability in (0, 1]", index)
+		}
+		q.Criteria = criteria
+		q.BlockOn = blockOn
 	}
 
 	return q, nil
+}
+
+// parseStringList returns nil (not an error) when raw is absent, so callers
+// can apply their own "required" check with a type-specific message.
+func parseStringList(raw interface{}, field string) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("'%s' must be an array of strings", field)
+	}
+	result := make([]string, 0, len(list))
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("'%s' entries must be strings", field)
+		}
+		result = append(result, s)
+	}
+	return result, nil
 }
 
 func extractFloat(value interface{}) (float64, error) {
