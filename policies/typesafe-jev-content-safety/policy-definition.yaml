@@ -67,6 +67,15 @@ parameters:
                   For 'noul': minimum probability (0-1) to block. For 'score':
                   minimum scale position to block. For 'choice': minimum combined
                   probability (0-1) of the 'blockOn' options to block.
+              confidenceThreshold:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Only for type 'score'. Minimum confidence (0-1) Jev must report
+                  for a score at or above 'threshold' to block. A less confident
+                  answer doesn't block and is recorded in request metadata instead.
+                  Omit or set to 0 to block on the score alone.
           default:
             - key: jailbreak
               type: noul
@@ -191,6 +200,15 @@ parameters:
                   For 'noul': minimum probability (0-1) to block. For 'score':
                   minimum scale position to block. For 'choice': minimum combined
                   probability (0-1) of the 'blockOn' options to block.
+              confidenceThreshold:
+                type: number
+                minimum: 0
+                maximum: 1
+                description: |
+                  Only for type 'score'. Minimum confidence (0-1) Jev must report
+                  for a score at or above 'threshold' to block. A less confident
+                  answer doesn't block and is recorded in request metadata instead.
+                  Omit or set to 0 to block on the score alone.
           default:
             - key: jailbreak
               type: noul

@@ -79,22 +79,26 @@ const (
 
 	// SharedContext.Metadata keys. Suffixed with the phase ("request" or
 	// "response") so both phases can record without overwriting each other.
-	metaKeyAssessmentsPrefix = "typesafe-jev-content-safety:assessments:"
-	metaKeyUsagePrefix       = "typesafe-jev-content-safety:usage:"
+	metaKeyAssessmentsPrefix   = "typesafe-jev-content-safety:assessments:"
+	metaKeyUsagePrefix         = "typesafe-jev-content-safety:usage:"
+	metaKeyLowConfidencePrefix = "typesafe-jev-content-safety:low-confidence:"
 )
 
 // guardrailQuestion is one entry in a configured question battery. Criteria
 // applies to (and is required for) Score and Choice questions; BlockOn only
 // applies to Choice. Threshold is compared against the Noul probability, the
 // Score value, or the summed probability of the BlockOn options, depending
-// on the question's type.
+// on the question's type. ConfidenceThreshold only applies to Score: a score
+// at or above Threshold blocks only when Jev's confidence also reaches it
+// (0 means off).
 type guardrailQuestion struct {
-	Key          string
-	Type         string
-	Instructions string
-	Criteria     []string
-	BlockOn      []string
-	Threshold    float64
+	Key                 string
+	Type                string
+	Instructions        string
+	Criteria            []string
+	BlockOn             []string
+	Threshold           float64
+	ConfidenceThreshold float64
 }
 
 // defaultQuestions is the battery used when a phase doesn't configure its
@@ -303,7 +307,7 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 		})
 	}
 
-	var failed []map[string]interface{}
+	var failed, lowConfidence []map[string]interface{}
 	for _, q := range params.Questions {
 		raw, ok := answers[q.Key]
 		if !ok {
@@ -314,13 +318,22 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 			// partial response.
 			return failure("Error processing Jev response", fmt.Errorf("Jev response missing answer for question %q", q.Key))
 		}
-		assessment, err := evaluateAnswer(q, raw)
+		assessment, blocks, err := evaluateAnswer(q, raw)
 		if err != nil {
 			return failure("Error processing Jev response", fmt.Errorf("question %q: %w", q.Key, err))
 		}
-		if assessment != nil {
+		switch {
+		case blocks:
 			failed = append(failed, assessment)
+		case assessment != nil:
+			lowConfidence = append(lowConfidence, assessment)
 		}
+	}
+
+	if len(lowConfidence) > 0 {
+		setMetadata(shared, metaKeyLowConfidencePrefix+phase, lowConfidence)
+		slog.Debug("TypesafeJevContentSafety: threshold reached below confidenceThreshold, not blocking",
+			"questions", lowConfidence, "phase", phase)
 	}
 
 	if len(failed) == 0 {
@@ -345,32 +358,40 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 
 // evaluateAnswer decodes one question's answer and returns its assessment
 // entry when the answer is at or above the question's threshold, or nil when
-// it isn't.
-func evaluateAnswer(q guardrailQuestion, raw json.RawMessage) (map[string]interface{}, error) {
-	assessment := map[string]interface{}{
+// it isn't. blocks is false for a score that reached its threshold without
+// reaching its confidenceThreshold: that assessment is only recorded.
+func evaluateAnswer(q guardrailQuestion, raw json.RawMessage) (assessment map[string]interface{}, blocks bool, err error) {
+	assessment = map[string]interface{}{
 		"question": q.Key, "type": q.Type, "threshold": q.Threshold,
 	}
 	var value float64
+	var confidence *float64
 	switch q.Type {
 	case questionTypeNoul:
 		v, err := decodeNoulAnswer(raw)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		value = v
 	case questionTypeScore:
 		a, err := decodeScoreAnswer(raw)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		value = a.Score
+		confidence = a.Confidence
 		if a.Confidence != nil {
 			assessment["confidence"] = *a.Confidence
+		}
+		// Jev always reports a Score's confidence; a missing one can't be
+		// checked against the configured threshold, so it's a malformed answer.
+		if q.ConfidenceThreshold > 0 && a.Confidence == nil {
+			return nil, false, fmt.Errorf("answer missing 'confidence' field")
 		}
 	case questionTypeChoice:
 		a, err := decodeChoiceAnswer(raw)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		// The blocking value is the total probability mass on the BlockOn
 		// options, not just whether one of them won the argmax — a 0.45/0.45
@@ -383,13 +404,17 @@ func evaluateAnswer(q guardrailQuestion, raw json.RawMessage) (map[string]interf
 			assessment["confidence"] = *a.Confidence
 		}
 	default:
-		return nil, fmt.Errorf("unsupported question type %q", q.Type)
+		return nil, false, fmt.Errorf("unsupported question type %q", q.Type)
 	}
 	if value < q.Threshold {
-		return nil, nil
+		return nil, false, nil
 	}
 	assessment["value"] = value
-	return assessment, nil
+	if q.ConfidenceThreshold > 0 && *confidence < q.ConfidenceThreshold {
+		assessment["confidenceThreshold"] = q.ConfidenceThreshold
+		return assessment, false, nil
+	}
+	return assessment, true, nil
 }
 
 func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool) interface{} {
@@ -869,6 +894,22 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 		return q, fmt.Errorf("'questions[%d].threshold' must be a number: %w", index, err)
 	}
 	q.Threshold = threshold
+
+	if raw, ok := qMap["confidenceThreshold"]; ok {
+		// Noul answers carry no confidence, and Choice already blocks on the
+		// combined probability of its blockOn options.
+		if qType != questionTypeScore {
+			return q, fmt.Errorf("'questions[%d].confidenceThreshold' only applies to type 'score'", index)
+		}
+		confidenceThreshold, err := extractFloat(raw)
+		if err != nil {
+			return q, fmt.Errorf("'questions[%d].confidenceThreshold' must be a number: %w", index, err)
+		}
+		if confidenceThreshold < 0 || confidenceThreshold > 1 {
+			return q, fmt.Errorf("'questions[%d].confidenceThreshold' must be between 0 and 1", index)
+		}
+		q.ConfidenceThreshold = confidenceThreshold
+	}
 
 	switch qType {
 	case questionTypeScore:

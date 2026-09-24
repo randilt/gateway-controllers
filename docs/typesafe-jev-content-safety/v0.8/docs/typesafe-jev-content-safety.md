@@ -16,7 +16,7 @@ Use this policy when you need content-level screening beyond pattern matching (`
 - Configurable battery of typed questions (`noul` yes/no, `score` scale, `choice` options) — add, remove, or reword any question without code changes
 - Independent configuration for request and response phases, including independent question batteries
 - JSONPath extraction targets any string field in the JSON body; for multimodal content-part arrays, only the text parts are screened
-- Configurable per-question thresholds
+- Configurable per-question thresholds, plus an optional minimum confidence for `score` questions so an uncertain score can't block on its own
 - `enforce` mode (blocks) or `monitor` mode (records hits without blocking, for tuning thresholds on real traffic)
 - Optional assessment details in the block response (which questions were flagged, their values, thresholds, and Jev's confidence)
 - Configurable Jev timeout (default `5s`) with one automatic retry when Jev is rate limited or overloaded
@@ -72,6 +72,7 @@ At least one of `request` or `response` is required. Each carries its own indepe
 | `criteria` | array of strings | Required for `score` and `choice` | For `score`: 2–10 ordered scale descriptions, lowest first (index 0 = no harm). For `choice`: 2–255 options; add an `other` option when the list might not cover every input. Ignored for `noul`. |
 | `blockOn` | array of strings | Required for `choice` | The `criteria` options that count towards blocking. Ignored for other types. |
 | `threshold` | number | Yes | For `noul`: minimum probability (0–1) to block. For `score`: minimum scale position to block. For `choice`: minimum combined probability (0–1) of the `blockOn` options to block — so two blocked options at 0.35 each count as 0.7, even if neither wins on its own. |
+| `confidenceThreshold` | number | No (`score` only) | Minimum confidence (0–1) Jev must report for a `score` at or above `threshold` to block. A less confident answer doesn't block; it is recorded in request metadata under `typesafe-jev-content-safety:low-confidence:request` (or `:response`). Omit or set to `0` to block on the score alone. Not allowed on `noul` (which has no confidence) or `choice`. |
 
 #### Default question battery
 

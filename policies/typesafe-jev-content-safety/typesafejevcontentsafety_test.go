@@ -20,6 +20,7 @@ package typesafejevcontentsafety
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -810,6 +811,158 @@ func TestParseQuestion_ChoiceValidation(t *testing.T) {
 			_, err := parseQuestion(q, 0)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+var severityQuestion = map[string]interface{}{
+	"key": "severity", "type": "score", "instructions": "...",
+	"criteria": []interface{}{"none", "mild", "serious", "severe"}, "threshold": 2.0,
+}
+
+func scoreAnswerWithConfidence(score float64, confidence interface{}) func(string) map[string]interface{} {
+	return func(string) map[string]interface{} {
+		a := map[string]interface{}{"type": "score", "score": score}
+		if confidence != nil {
+			a["confidence"] = confidence
+		}
+		return a
+	}
+}
+
+func severityWithConfidenceThreshold(threshold interface{}) map[string]interface{} {
+	q := map[string]interface{}{}
+	for k, v := range severityQuestion {
+		q[k] = v
+	}
+	if threshold != nil {
+		q["confidenceThreshold"] = threshold
+	}
+	return q
+}
+
+func TestParseQuestion_ConfidenceThreshold(t *testing.T) {
+	q, err := parseQuestion(severityWithConfidenceThreshold(0.6), 0)
+	if err != nil || q.ConfidenceThreshold != 0.6 {
+		t.Fatalf("expected confidenceThreshold 0.6, got %v (err %v)", q.ConfidenceThreshold, err)
+	}
+	q, err = parseQuestion(severityWithConfidenceThreshold(nil), 0)
+	if err != nil || q.ConfidenceThreshold != 0 {
+		t.Fatalf("expected confidenceThreshold to default to 0 (off), got %v (err %v)", q.ConfidenceThreshold, err)
+	}
+
+	tests := []struct {
+		name     string
+		question map[string]interface{}
+		wantErr  string
+	}{
+		{"above 1", severityWithConfidenceThreshold(1.5), "between 0 and 1"},
+		{"below 0", severityWithConfidenceThreshold(-0.1), "between 0 and 1"},
+		{"not a number", severityWithConfidenceThreshold("high"), "must be a number"},
+		{"on noul", func() map[string]interface{} {
+			q := map[string]interface{}{"confidenceThreshold": 0.5}
+			for k, v := range jailbreakQuestion {
+				q[k] = v
+			}
+			return q
+		}(), "only applies to type 'score'"},
+		{"on choice", func() map[string]interface{} {
+			q := map[string]interface{}{"confidenceThreshold": 0.5}
+			for k, v := range topicQuestion {
+				q[k] = v
+			}
+			return q
+		}(), "only applies to type 'score'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseQuestion(tt.question, 0)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+// A score at or above its threshold blocks only when Jev is confident enough;
+// a less confident answer is recorded instead of blocking.
+func TestOnRequestBody_ScoreConfidenceThreshold(t *testing.T) {
+	tests := []struct {
+		name       string
+		score      float64
+		confidence float64
+		wantBlock  bool
+		wantLowRec bool
+	}{
+		{"confident high score blocks", 3, 0.9, true, false},
+		{"confidence exactly at threshold blocks", 3, 0.6, true, false},
+		{"unconfident high score does not block", 3, 0.2, false, true},
+		{"zero confidence does not block", 3, 0, false, true},
+		{"low score passes regardless of confidence", 1, 0.9, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, _ := capturingJevServer(t, scoreAnswerWithConfidence(tt.score, tt.confidence))
+			defer server.Close()
+			p := newPolicy(t, map[string]interface{}{
+				"baseURL": server.URL,
+				"request": map[string]interface{}{
+					"questions": []interface{}{severityWithConfidenceThreshold(0.6)},
+				},
+			})
+			req := requestWithBody(`{"messages":[{"role":"user","content":"hello"}]}`)
+			action := p.OnRequestBody(context.Background(), req, nil)
+
+			_, blocked := action.(policy.ImmediateResponse)
+			if blocked != tt.wantBlock {
+				t.Fatalf("blocked = %v, want %v (action %T)", blocked, tt.wantBlock, action)
+			}
+			recorded, hasRecord := req.Metadata[metaKeyLowConfidencePrefix+"request"].([]map[string]interface{})
+			if hasRecord != tt.wantLowRec {
+				t.Fatalf("low-confidence metadata present = %v, want %v (%#v)", hasRecord, tt.wantLowRec, req.Metadata)
+			}
+			if tt.wantLowRec {
+				if len(recorded) != 1 || recorded[0]["question"] != "severity" || recorded[0]["confidence"] != tt.confidence ||
+					recorded[0]["value"] != tt.score || recorded[0]["confidenceThreshold"] != 0.6 {
+					t.Fatalf("unexpected low-confidence record: %#v", recorded)
+				}
+			}
+		})
+	}
+}
+
+// Without confidenceThreshold, a score blocks on its value alone, as before.
+func TestOnRequestBody_ScoreWithoutConfidenceThresholdIgnoresConfidence(t *testing.T) {
+	server, _ := capturingJevServer(t, scoreAnswerWithConfidence(3, 0.0))
+	defer server.Close()
+	p := newPolicy(t, map[string]interface{}{
+		"baseURL": server.URL,
+		"request": map[string]interface{}{"questions": []interface{}{severityWithConfidenceThreshold(nil)}},
+	})
+	action := p.OnRequestBody(context.Background(), requestWithBody(`{"messages":[{"role":"user","content":"hello"}]}`), nil)
+	if _, blocked := action.(policy.ImmediateResponse); !blocked {
+		t.Fatalf("expected a block on the score alone when confidenceThreshold is not set, got %T", action)
+	}
+}
+
+// With confidenceThreshold set, a score answer without a confidence is
+// malformed, so it follows passthroughOnError like any other bad answer.
+func TestOnRequestBody_ScoreMissingConfidenceIsMalformed(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		t.Run(fmt.Sprintf("passthroughOnError=%v", passthrough), func(t *testing.T) {
+			server, _ := capturingJevServer(t, scoreAnswerWithConfidence(3, nil))
+			defer server.Close()
+			p := newPolicy(t, map[string]interface{}{
+				"baseURL": server.URL,
+				"request": map[string]interface{}{
+					"questions":          []interface{}{severityWithConfidenceThreshold(0.6)},
+					"passthroughOnError": passthrough,
+				},
+			})
+			action := p.OnRequestBody(context.Background(), requestWithBody(`{"messages":[{"role":"user","content":"hello"}]}`), nil)
+			if _, blocked := action.(policy.ImmediateResponse); blocked == passthrough {
+				t.Fatalf("blocked = %v with passthroughOnError=%v", blocked, passthrough)
 			}
 		})
 	}
