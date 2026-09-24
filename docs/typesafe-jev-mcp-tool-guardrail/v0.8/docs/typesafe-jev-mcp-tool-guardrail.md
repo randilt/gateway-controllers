@@ -25,7 +25,7 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
 - Default question battery covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive and security-weakening calls; with `scope` set, effects the scope calls for aren't flagged and calls outside it are
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
-- Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was
+- Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was sent with `Content-Type: text/event-stream`
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
 - `enforce` mode (blocks) or `monitor` mode (records hits without blocking, for tuning thresholds on real traffic)
 - Configurable Jev timeout (default `5s`) with one automatic retry when Jev is rate limited or overloaded
@@ -61,7 +61,7 @@ jev_model = "jev-latest"
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope`: the default questions that judge an effect then ignore effects the scope calls for, and the `out_of_scope` question is added. |
-| `questions` | array of objects | No | See [default battery](#default-question-battery) | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold. |
+| `questions` | array of objects | No | See [default battery](#default-question-battery) | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
 | `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
 | `passthroughOnError` | boolean | No | `false` | When `true`, lets the call through if the Jev API call fails or times out (fail-open). When `false`, the call is rejected with a JSON-RPC internal error (fail-closed). |
@@ -105,7 +105,7 @@ When `scope` is set, `destructive`, `irreversible`, `privilege` and `disruption`
 | Case | HTTP status | JSON-RPC code |
 |------|-------------|---------------|
 | Invalid JSON | `400` | `-32700` |
-| Not a single JSON-RPC object (for example a batch array) | `400` | `-32600` |
+| Not a single JSON-RPC object (for example a batch array, or an event-stream body with more than one event) | `400` | `-32600` |
 | Duplicate or case-variant `id`, `method`, `params`, `name` or `arguments` member | `400` | `-32600` |
 | `params` missing or not an object, tool name missing, or `arguments` not an object | `400` | `-32602` |
 
@@ -137,7 +137,7 @@ With `showAssessment: true`, `error.data` carries the details:
 
 When the check itself fails (a Jev error, timeout, or incomplete answer) and the policy fails closed, the call gets HTTP `503` with JSON-RPC code `-32603` and the message `MCP tool call could not be checked by guardrail`.
 
-Every error response echoes the request `id` and the `Mcp-Session-Id` header. If the request was sent with `Content-Type: text/event-stream`, the error is framed as a single server-sent event.
+Every error response echoes the `Mcp-Session-Id` header, and the request `id` when the policy could read it; a body rejected as invalid JSON, not a single object, or with an ambiguous `id` gets `"id": null`. If the request was sent with `Content-Type: text/event-stream`, the error is framed as a single server-sent event.
 
 #### Monitor mode
 

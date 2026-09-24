@@ -301,8 +301,11 @@ func parseToolCall(body []byte, headers *policy.Headers) (*toolCallRequest, *pol
 
 	raw := body
 	if isEventStream(headers) {
-		data, ok := firstEventData(body)
-		if !ok {
+		data, events := eventStreamData(body)
+		if events > 1 {
+			return reject(jsonRpcErrCodeRequest, "Request body is not a single JSON-RPC request object", nil)
+		}
+		if strings.TrimSpace(string(data)) == "" {
 			return reject(jsonRpcErrCodeParse, "Invalid JSON", nil)
 		}
 		raw = data
@@ -576,27 +579,35 @@ func isEventStream(headers *policy.Headers) bool {
 	return false
 }
 
-// firstEventData returns the data of the first SSE event that carries any,
-// joining multi-line data the way the SSE format defines.
-func firstEventData(body []byte) ([]byte, bool) {
-	var dataLines []string
+// eventStreamData returns the data of the first SSE event that carries any,
+// joining multi-line data the way the SSE format defines, and how many events
+// carry data. A POST body holds one JSON-RPC message, so a caller must refuse a
+// body with more than one: screening only the first would leave the others
+// unchecked.
+func eventStreamData(body []byte) (data []byte, events int) {
+	var first, current []string
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		events++
+		if first == nil {
+			first = current
+		}
+		current = nil
+	}
 	for _, line := range strings.Split(string(body), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
-			if len(dataLines) > 0 {
-				break
-			}
+			flush()
 			continue
 		}
 		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			current = append(current, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
 		}
 	}
-	data := strings.Join(dataLines, "\n")
-	if strings.TrimSpace(data) == "" {
-		return nil, false
-	}
-	return []byte(data), true
+	flush()
+	return []byte(strings.Join(first, "\n")), events
 }
 
 // buildRequestErrorResponse builds a JSON-RPC error response, framed as SSE when
@@ -1033,7 +1044,13 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 		q.ConfidenceThreshold = confidenceThreshold
 	}
 
+	// A threshold outside the range an answer can take would silently never block,
+	// or always block, so it is rejected here.
 	switch qType {
+	case questionTypeNoul:
+		if threshold <= 0 || threshold > 1 {
+			return q, fmt.Errorf("'questions[%d].threshold' for type 'noul' must be a probability in (0, 1]", index)
+		}
 	case questionTypeScore:
 		criteria, err := parseStringList(qMap["criteria"], fmt.Sprintf("questions[%d].criteria", index))
 		if err != nil {
@@ -1041,6 +1058,10 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 		}
 		if len(criteria) < 2 || len(criteria) > maxScoreLevels {
 			return q, fmt.Errorf("'questions[%d].criteria' is required for type 'score' and must have 2 to %d entries", index, maxScoreLevels)
+		}
+		// Score positions run from 0 (the first criteria entry) to len(criteria)-1.
+		if maxScore := float64(len(criteria) - 1); threshold <= 0 || threshold > maxScore {
+			return q, fmt.Errorf("'questions[%d].threshold' for type 'score' must be greater than 0 and at most %v, the last scale position", index, maxScore)
 		}
 		q.Criteria = criteria
 	case questionTypeChoice:

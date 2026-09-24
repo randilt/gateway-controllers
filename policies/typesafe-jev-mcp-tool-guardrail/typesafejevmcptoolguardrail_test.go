@@ -212,6 +212,43 @@ func TestGetPolicy_Params(t *testing.T) {
 			wantErr: "only applies to type 'score'",
 		},
 		{
+			name: "noul threshold above 1",
+			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
+				map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 1.5},
+			}},
+			wantErr: "for type 'noul' must be a probability in (0, 1]",
+		},
+		{
+			name: "noul threshold 0",
+			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
+				map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 0},
+			}},
+			wantErr: "for type 'noul' must be a probability in (0, 1]",
+		},
+		{
+			name: "score threshold above last position",
+			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
+				map[string]interface{}{"key": "a", "type": "score", "instructions": "x?", "threshold": 3,
+					"criteria": []interface{}{"low", "mid", "high"}},
+			}},
+			wantErr: "at most 2, the last scale position",
+		},
+		{
+			name: "score threshold 0",
+			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
+				map[string]interface{}{"key": "a", "type": "score", "instructions": "x?", "threshold": 0,
+					"criteria": []interface{}{"low", "high"}},
+			}},
+			wantErr: "for type 'score' must be greater than 0",
+		},
+		{
+			name: "score threshold at last position",
+			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
+				map[string]interface{}{"key": "a", "type": "score", "instructions": "x?", "threshold": 2,
+					"criteria": []interface{}{"low", "mid", "high"}},
+			}},
+		},
+		{
 			name: "choice blockOn not in criteria",
 			params: map[string]interface{}{"apiKey": "k", "questions": []interface{}{
 				map[string]interface{}{"key": "a", "type": "choice", "instructions": "x?", "threshold": 0.5,
@@ -650,6 +687,43 @@ func TestOnRequestBody_RejectsUnreadableOrAmbiguousBodies(t *testing.T) {
 	}
 	if n := jev.calls.Load(); n != 0 {
 		t.Fatalf("Jev called %d times for bodies that should be rejected first", n)
+	}
+}
+
+// An event-stream request body carries one JSON-RPC message; a second
+// data-carrying event would go unscreened, so the body is refused.
+func TestOnRequestBody_RejectsMultiEventStreamBody(t *testing.T) {
+	jev := newMockJev(t, answering(benignAnswers))
+	p := newPolicy(t, jev.server.URL, nil)
+	sse := map[string][]string{"content-type": {"text/event-stream"}}
+
+	benign := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":1,"b":2}}}`
+	tests := []struct {
+		name     string
+		body     string
+		wantCode int
+	}{
+		{name: "second event", body: "data: " + benign + "\n\ndata: " + toolCallDrop + "\n\n", wantCode: jsonRpcErrCodeRequest},
+		{name: "second event without trailing blank line", body: "data: " + benign + "\n\ndata: " + toolCallDrop, wantCode: jsonRpcErrCodeRequest},
+		{name: "no data", body: "event: message\n\n", wantCode: jsonRpcErrCodeParse},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := mustImmediate(t, p.OnRequestBody(context.Background(), mcpRequest(tt.body, sse), nil))
+			if _, code, _, _ := decodeError(t, resp); code != tt.wantCode {
+				t.Fatalf("code = %d, want %d", code, tt.wantCode)
+			}
+			if resp.Headers["Content-Type"] != "text/event-stream" {
+				t.Fatalf("Content-Type = %q, want the error framed as the request was", resp.Headers["Content-Type"])
+			}
+		})
+	}
+
+	// One event whose data spans several lines is still one message.
+	multiLine := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\ndata: \"method\":\"tools/call\",\"params\":{\"name\":\"add\"}}\n\n"
+	mustPassthrough(t, p.OnRequestBody(context.Background(), mcpRequest(multiLine, sse), nil))
+	if n := jev.calls.Load(); n != 1 {
+		t.Fatalf("Jev called %d times, want 1 (only the single-event body)", n)
 	}
 }
 
