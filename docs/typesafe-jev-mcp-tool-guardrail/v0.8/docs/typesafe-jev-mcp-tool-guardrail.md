@@ -16,7 +16,7 @@ For each tool call, the policy sends Jev a JSON state holding the tool name, its
 }
 ```
 
-If any question's answer crosses its threshold, the call is blocked with a JSON-RPC error. In monitor mode, the policy only records that it would have blocked.
+If any question's answer reaches its threshold, the call is blocked with a JSON-RPC error. A `score` question with a `confidenceThreshold` blocks only when Jev's confidence also reaches it; a less confident answer is only recorded. In monitor mode, the policy only records that it would have blocked.
 
 Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which tools a client may call by name and scope; this policy judges what a particular call would do. For example, `run_sql` may be allowed, but `run_sql` with `DROP TABLE users;` can still be blocked.
 
