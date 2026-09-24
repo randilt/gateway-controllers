@@ -123,7 +123,7 @@ Inside the `api-platform` repository, add the policy package under `policies:` i
 
 ```yaml
 - name: typesafe-jev-content-safety
-  gomodule: github.com/wso2/gateway-controllers/policies/typesafe-jev-content-safety@v1
+  gomodule: github.com/wso2/gateway-controllers/policies/typesafe-jev-content-safety@v0
 ```
 
 ## Reference Scenarios
@@ -155,7 +155,7 @@ spec:
         methods: [POST]
   operationPolicies:
     - name: typesafe-jev-content-safety
-      version: v1
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -211,7 +211,7 @@ Replace the default battery entirely with your own questions, and enable assessm
 ```yaml
 operationPolicies:
   - name: typesafe-jev-content-safety
-    version: v1
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
@@ -263,7 +263,7 @@ Configure independent batteries for each phase, and allow traffic to proceed if 
 ```yaml
 operationPolicies:
   - name: typesafe-jev-content-safety
-    version: v1
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
@@ -302,7 +302,7 @@ Use a `choice` question to classify what a request is about, in monitor mode, to
 ```yaml
 operationPolicies:
   - name: typesafe-jev-content-safety
-    version: v1
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
