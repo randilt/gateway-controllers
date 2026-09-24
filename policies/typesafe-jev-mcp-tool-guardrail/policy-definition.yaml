@@ -1,0 +1,132 @@
+name: typesafe-jev-mcp-tool-guardrail
+version: v0.8.0
+displayName: TypeSafe Jev MCP Tool Guardrail
+description: |
+  Screens MCP tools/call requests using TypeSafe AI's Jev "System One" model.
+  Sends the tool name and arguments to Jev with a configurable battery of
+  typed questions, and blocks the call with a JSON-RPC error when any
+  question's answer crosses its threshold, or records it in monitor mode.
+
+parameters:
+  type: object
+  properties:
+    scope:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        What the agent using this MCP server is meant to do, in plain words
+        (for example "A customer support assistant that looks up orders").
+        When set, the default questions also ask whether a tool call falls
+        outside it. The MCP proxy doesn't see the agent's conversation, so
+        this text is the only scope Jev can judge against.
+    questions:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        The battery of typed questions to ask Jev about each tool call. Jev
+        sees a JSON state with "tool" ("name" and "arguments") and "scope";
+        refer to them in instructions, for example `tool.arguments`. Leave
+        empty to use the default battery: "destructive", "irreversible" and
+        "exfiltration" (noul, threshold 0.7), plus "out_of_scope" (noul,
+        threshold 0.7) when 'scope' is set. The call is blocked if any
+        question's answer is at or above its threshold.
+      items:
+        type: object
+        required: [key, type, instructions, threshold]
+        properties:
+          key:
+            type: string
+            description: Unique identifier for this question, used in the block assessment.
+          type:
+            type: string
+            enum: [noul, score, choice]
+            description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
+          instructions:
+            type: string
+            description: The question to ask Jev about the tool call.
+          criteria:
+            type: array
+            items:
+              type: string
+            description: |
+              Required for types 'score' and 'choice'. For 'score': 2-10 ordered
+              scale descriptions, lowest first. For 'choice': 2-255 options to
+              choose between; add an "other" option when the list might not
+              cover every call.
+          blockOn:
+            type: array
+            items:
+              type: string
+            description: Required for type 'choice'. The 'criteria' options that count towards blocking.
+          threshold:
+            type: number
+            description: |
+              For 'noul': minimum probability (0-1) to block. For 'score':
+              minimum scale position to block. For 'choice': minimum combined
+              probability (0-1) of the 'blockOn' options to block.
+          confidenceThreshold:
+            type: number
+            minimum: 0
+            maximum: 1
+            description: |
+              Only for type 'score'. Minimum confidence (0-1) Jev must report
+              for a score at or above 'threshold' to block. A less confident
+              answer doesn't block and is recorded in request metadata instead.
+              Omit or set to 0 to block on the score alone.
+    mode:
+      type: string
+      enum: [enforce, monitor]
+      x-wso2-policy-advanced-param: false
+      description: |
+        'enforce' (default) blocks when a question crosses its threshold.
+        'monitor' never blocks: it lets the call through and records the hit
+        in analytics (isGuardrailHit, guardrailName) and the flagged questions
+        in request metadata. Use it to tune thresholds on real traffic before
+        enforcing.
+      default: enforce
+    timeout:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Maximum time to wait for Jev, as a Go duration string (for example
+        "5s" or "1500ms"), up to "30s". Includes one retry when Jev is rate
+        limited or overloaded. On timeout, passthroughOnError decides whether
+        the call continues.
+      default: "5s"
+    passthroughOnError:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies whether tool calls continue when the Jev API call fails.
+        True allows passthrough; false (default) rejects the call with a
+        JSON-RPC internal error.
+      default: false
+    showAssessment:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies whether the JSON-RPC error for a blocked call includes, in
+        "error.data", which questions were flagged, their values, and
+        thresholds.
+      default: false
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    apiKey:
+      type: string
+      description: TypeSafe AI API key (https://typesafe.ai).
+      minLength: 1
+      "wso2/defaultValue": "${config.jev_apikey}"
+    baseURL:
+      type: string
+      format: uri
+      description: Override the Jev API base URL (for testing only).
+      "wso2/defaultValue": "${config.jev_base_url}"
+    model:
+      type: string
+      description: Jev model identifier.
+      "wso2/defaultValue": "${config.jev_model}"
+  required:
+    - apiKey
