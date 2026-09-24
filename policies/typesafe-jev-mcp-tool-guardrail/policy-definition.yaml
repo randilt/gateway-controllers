@@ -16,9 +16,10 @@ parameters:
       description: |
         What the agent using this MCP server is meant to do, in plain words
         (for example "A customer support assistant that looks up orders").
-        When set, the default questions also ask whether a tool call falls
-        outside it. The MCP proxy doesn't see the agent's conversation, so
-        this text is the only scope Jev can judge against.
+        When set, the default questions ignore effects the scope calls for
+        and also ask whether a tool call falls outside it. The MCP proxy
+        doesn't see the agent's conversation, so this text is the only scope
+        Jev can judge against.
     questions:
       type: array
       x-wso2-policy-advanced-param: false
@@ -26,10 +27,11 @@ parameters:
         The battery of typed questions to ask Jev about each tool call. Jev
         sees a JSON state with "tool" ("name" and "arguments") and "scope";
         refer to them in instructions, for example `tool.arguments`. Leave
-        empty to use the default battery: "destructive", "irreversible" and
-        "exfiltration" (noul, threshold 0.7), plus "out_of_scope" (noul,
-        threshold 0.7) when 'scope' is set. The call is blocked if any
-        question's answer is at or above its threshold.
+        empty to use the default battery of noul questions, each blocking at
+        0.7: "destructive", "irreversible", "exfiltration", "sensitive_data",
+        "privilege", "disruption" and "security_control", plus "out_of_scope"
+        when 'scope' is set. The call is blocked if any question's answer is
+        at or above its threshold.
       items:
         type: object
         required: [key, type, instructions, threshold]

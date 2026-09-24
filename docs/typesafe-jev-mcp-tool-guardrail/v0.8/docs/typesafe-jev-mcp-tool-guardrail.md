@@ -23,7 +23,7 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 ## Features
 
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
-- Default question battery for destructive, irreversible and data-exfiltrating calls, plus an out-of-scope question when `scope` is set
+- Default question battery covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive and security-weakening calls; with `scope` set, effects the scope calls for aren't flagged and calls outside it are
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
 - Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
@@ -60,7 +60,7 @@ jev_model = "jev-latest"
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope` and the default battery also asks the `out_of_scope` question. |
+| `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope`: the default questions that judge an effect then ignore effects the scope calls for, and the `out_of_scope` question is added. |
 | `questions` | array of objects | No | See [default battery](#default-question-battery) | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold. |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
 | `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
@@ -85,10 +85,16 @@ When `questions` is omitted or empty, the policy asks these `noul` questions, ea
 
 | Key | Instructions |
 |-----|--------------|
-| `destructive` | Would running the tool call in `tool` destroy or damage data, files, or systems? |
+| `destructive` | Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated? |
 | `irreversible` | Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something? |
 | `exfiltration` | Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation? |
+| `sensitive_data` | Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data? |
+| `privilege` | Would running the tool call in `tool` grant or raise access rights or permissions? |
+| `disruption` | Would running the tool call in `tool` stop, shut down, or take offline a running service or system? |
+| `security_control` | Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging? |
 | `out_of_scope` | Is the tool call in `tool` unrelated to the purpose described in `scope`? Only asked when `scope` is set. |
+
+When `scope` is set, `destructive`, `irreversible`, `privilege` and `disruption` also exclude what the scope calls for. For example, `destructive` becomes "… that cannot easily be recreated, in a way that `scope` does not call for?". This keeps the guardrail from blocking the work the agent exists to do, such as a support assistant replying to a customer or issuing a refund within its limit.
 
 #### What is screened
 

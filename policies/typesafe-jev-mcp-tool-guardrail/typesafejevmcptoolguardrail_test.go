@@ -70,14 +70,28 @@ func newMockJev(t *testing.T, handler func(w http.ResponseWriter, call int32)) *
 	return m
 }
 
+// answering serves the given noul answers, answering every other default question
+// with a low probability so a test only has to name the questions it cares about.
 func answering(nouls map[string]float64) func(w http.ResponseWriter, call int32) {
+	full := withDefaultAnswers(nouls)
 	return func(w http.ResponseWriter, _ int32) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(jevAnswers(nouls))
+		_, _ = w.Write(jevAnswers(full))
 	}
 }
 
-var benignAnswers = map[string]float64{"destructive": 0.02, "irreversible": 0.03, "exfiltration": 0.05, "out_of_scope": 0.04}
+func withDefaultAnswers(nouls map[string]float64) map[string]float64 {
+	full := map[string]float64{"out_of_scope": 0.01}
+	for _, q := range defaultQuestions(false) {
+		full[q.Key] = 0.01
+	}
+	for k, v := range nouls {
+		full[k] = v
+	}
+	return full
+}
+
+var benignAnswers = withDefaultAnswers(map[string]float64{"destructive": 0.02, "irreversible": 0.03, "exfiltration": 0.05, "out_of_scope": 0.04})
 
 func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *TypesafeJevMcpToolGuardrailPolicy {
 	t.Helper()
@@ -230,12 +244,13 @@ func TestDefaultQuestions_OutOfScopeOnlyWithScope(t *testing.T) {
 		}
 		return out
 	}
+	const effects = "destructive,irreversible,exfiltration,sensitive_data,privilege,disruption,security_control"
 	without := newPolicy(t, "http://unused", nil)
-	if got := strings.Join(keys(without.questions), ","); got != "destructive,irreversible,exfiltration" {
+	if got := strings.Join(keys(without.questions), ","); got != effects {
 		t.Fatalf("questions without scope = %s", got)
 	}
 	with := newPolicy(t, "http://unused", map[string]interface{}{"scope": "  A calculator assistant.  "})
-	if got := strings.Join(keys(with.questions), ","); got != "destructive,irreversible,exfiltration,out_of_scope" {
+	if got := strings.Join(keys(with.questions), ","); got != effects+",out_of_scope" {
 		t.Fatalf("questions with scope = %s", got)
 	}
 	if with.scope != "A calculator assistant." {
@@ -244,6 +259,22 @@ func TestDefaultQuestions_OutOfScopeOnlyWithScope(t *testing.T) {
 	for _, q := range with.questions {
 		if q.Type != questionTypeNoul || q.Threshold != defaultThreshold {
 			t.Fatalf("default question %q = %s/%v, want noul/%v", q.Key, q.Type, q.Threshold, defaultThreshold)
+		}
+	}
+}
+
+// Without a scope no question may refer to one; with a scope, the questions that
+// judge an effect exclude what the scope calls for.
+func TestDefaultQuestions_ScopeAwareWording(t *testing.T) {
+	scopedKeys := map[string]bool{"destructive": true, "irreversible": true, "privilege": true, "disruption": true, "out_of_scope": true}
+	for _, q := range defaultQuestions(false) {
+		if strings.Contains(q.Instructions, "`scope`") {
+			t.Fatalf("question %q refers to scope without one configured: %s", q.Key, q.Instructions)
+		}
+	}
+	for _, q := range defaultQuestions(true) {
+		if got := strings.Contains(q.Instructions, "`scope`"); got != scopedKeys[q.Key] {
+			t.Fatalf("question %q refers to scope = %v, want %v: %s", q.Key, got, scopedKeys[q.Key], q.Instructions)
 		}
 	}
 }
@@ -342,7 +373,7 @@ func TestOnRequestBody_SendsToolCallStateAndQuestions(t *testing.T) {
 	if sent.State.Scope != "A support assistant." {
 		t.Fatalf("state.scope = %q", sent.State.Scope)
 	}
-	if len(sent.Questions) != 4 || sent.Questions["out_of_scope"].Type != "noul" {
+	if len(sent.Questions) != len(defaultBattery)+1 || sent.Questions["out_of_scope"].Type != "noul" {
 		t.Fatalf("questions = %+v", sent.Questions)
 	}
 }
