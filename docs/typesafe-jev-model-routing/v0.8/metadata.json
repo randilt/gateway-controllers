@@ -1,7 +1,7 @@
 {
   "name": "typesafe-jev-model-routing",
   "displayName": "TypeSafe Jev Model Routing",
-  "version": "0.9",
+  "version": "0.8",
   "provider": "WSO2",
   "categories": [
     "AI"
