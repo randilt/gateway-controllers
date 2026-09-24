@@ -816,6 +816,45 @@ func TestParseQuestion_ChoiceValidation(t *testing.T) {
 	}
 }
 
+// A threshold outside the range an answer can take would never, or always,
+// block, so it must fail validation.
+func TestParseQuestion_ThresholdRange(t *testing.T) {
+	with := func(base map[string]interface{}, threshold float64) map[string]interface{} {
+		q := map[string]interface{}{}
+		for k, v := range base {
+			q[k] = v
+		}
+		q["threshold"] = threshold
+		return q
+	}
+	tests := []struct {
+		name     string
+		question map[string]interface{}
+		wantErr  string
+	}{
+		{"noul above 1", with(jailbreakQuestion, 1.5), "for type 'noul' must be a probability in (0, 1]"},
+		{"noul 0", with(jailbreakQuestion, 0), "for type 'noul' must be a probability in (0, 1]"},
+		{"noul 1", with(jailbreakQuestion, 1), ""},
+		{"score above last position", with(severityQuestion, 4), "at most 3, the last scale position"},
+		{"score 0", with(severityQuestion, 0), "for type 'score' must be greater than 0"},
+		{"score at last position", with(severityQuestion, 3), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseQuestion(tt.question, 0)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 var severityQuestion = map[string]interface{}{
 	"key": "severity", "type": "score", "instructions": "...",
 	"criteria": []interface{}{"none", "mild", "serious", "severe"}, "threshold": 2.0,

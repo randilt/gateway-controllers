@@ -911,7 +911,13 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 		q.ConfidenceThreshold = confidenceThreshold
 	}
 
+	// A threshold outside the range an answer can take would silently never block,
+	// or always block, so it is rejected here.
 	switch qType {
+	case questionTypeNoul:
+		if threshold <= 0 || threshold > 1 {
+			return q, fmt.Errorf("'questions[%d].threshold' for type 'noul' must be a probability in (0, 1]", index)
+		}
 	case questionTypeScore:
 		criteria, err := parseStringList(qMap["criteria"], fmt.Sprintf("questions[%d].criteria", index))
 		if err != nil {
@@ -919,6 +925,10 @@ func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, e
 		}
 		if len(criteria) < 2 || len(criteria) > maxScoreLevels {
 			return q, fmt.Errorf("'questions[%d].criteria' is required for type 'score' and must have 2 to %d entries", index, maxScoreLevels)
+		}
+		// Score positions run from 0 (the first criteria entry) to len(criteria)-1.
+		if maxScore := float64(len(criteria) - 1); threshold <= 0 || threshold > maxScore {
+			return q, fmt.Errorf("'questions[%d].threshold' for type 'score' must be greater than 0 and at most %v, the last scale position", index, maxScore)
 		}
 		q.Criteria = criteria
 	case questionTypeChoice:
