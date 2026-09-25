@@ -257,6 +257,14 @@ func (p *TypesafeJevContentSafetyPolicy) OnResponseBody(ctx context.Context, res
 	if !p.hasResponseParams {
 		return policy.DownstreamResponseModifications{}
 	}
+	// An upstream error response carries the provider's error, not generated
+	// content. Screening it would fail to find the configured path and, failing
+	// closed, replace the provider's error with a guardrail block that hides
+	// what went wrong. 0 means the status is unknown, so the body is screened.
+	if status := respCtx.ResponseStatus; status != 0 && (status < 200 || status > 299) {
+		slog.Debug("TypesafeJevContentSafety: Upstream returned an error response, not screening it", "status", status)
+		return policy.DownstreamResponseModifications{}
+	}
 	var content []byte
 	if respCtx.ResponseBody != nil {
 		content = respCtx.ResponseBody.Content

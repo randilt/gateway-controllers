@@ -22,6 +22,7 @@ Use this policy when you need content-level screening beyond pattern matching (`
 - Configurable Jev timeout (default `5s`) with one automatic retry when Jev is rate limited or overloaded
 - Fail-closed by default on Jev API errors and timeouts; configurable to fail-open
 - Streaming is unaffected when only request screening is configured; response screening buffers streamed replies and screens the reassembled text
+- Upstream error responses (any non-2xx status) are passed through unscreened, so clients see the provider's own error rather than a guardrail block
 - Records Jev token usage and flagged questions in request metadata
 
 ## Configuration

@@ -1131,3 +1131,44 @@ func TestNormalizeWildcards(t *testing.T) {
 		}
 	}
 }
+
+// An upstream error response is passed through unscreened, so the client sees
+// the provider's error rather than a guardrail block; a successful response, or
+// one whose status is unknown, is still screened.
+func TestOnResponseBody_UpstreamErrorIsNotScreened(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		json.NewEncoder(w).Encode(map[string]interface{}{"answers": map[string]interface{}{
+			"jailbreak": map[string]interface{}{"type": "noul", "noul": 0.95}}})
+	}))
+	defer server.Close()
+	p := newPolicy(t, map[string]interface{}{
+		"baseURL":  server.URL,
+		"response": map[string]interface{}{"questions": []interface{}{jailbreakQuestion}},
+	})
+	respond := func(status int, body string) policy.ResponseAction {
+		return p.OnResponseBody(context.Background(), &policy.ResponseContext{
+			SharedContext:  &policy.SharedContext{},
+			ResponseStatus: status,
+			ResponseBody:   &policy.Body{Content: []byte(body), Present: true},
+		}, nil)
+	}
+
+	for _, status := range []int{400, 429, 500, 503} {
+		action := respond(status, `{"error":{"code":"BadRequest","message":"Invalid image URL."}}`)
+		if mods, ok := action.(policy.DownstreamResponseModifications); !ok || mods.StatusCode != nil || mods.Body != nil {
+			t.Fatalf("status %d: expected the upstream error to pass through unchanged, got %+v", status, action)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("expected no Jev call for upstream errors, got %d", calls)
+	}
+
+	for _, status := range []int{200, 0} {
+		action := respond(status, `{"choices":[{"message":{"content":"Sure, here is how."}}]}`)
+		if mods, ok := action.(policy.DownstreamResponseModifications); !ok || mods.StatusCode == nil {
+			t.Fatalf("status %d: expected the response to be screened and blocked, got %+v", status, action)
+		}
+	}
+}
