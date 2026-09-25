@@ -32,10 +32,11 @@ parameters:
           description: |
             The battery of typed questions to ask Jev about the extracted
             text. Add, remove, or reword questions to cover hazards the
-            default battery doesn't catch. Each question is either type
-            "noul" (a calibrated yes/no probability) or type "score" (a
-            position on the "criteria" scale you define). The request is
-            blocked if any question's answer is at or above its threshold.
+            default battery doesn't catch. Each question is type "noul"
+            (a calibrated yes/no probability), type "score" (a position on
+            the "criteria" scale you define), or type "choice" (a
+            probability for each "criteria" option). The request is blocked
+            if any question's answer is at or above its threshold.
           items:
             type: object
             required: [key, type, instructions, threshold]
