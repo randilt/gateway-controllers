@@ -511,7 +511,7 @@ func setMetadata(shared *policy.SharedContext, key string, value interface{}) {
 // from each event's streamingJsonPath fragment before screening.
 func extractText(payload []byte, params typesafeJevContentSafetyPhaseParams, isResponse bool) (string, error) {
 	if isResponse && isSSE(payload) {
-		return extractSSEText(payload, params.StreamingJSONPath), nil
+		return extractSSEText(payload, params.StreamingJSONPath)
 	}
 	if params.JSONPath == "" {
 		return string(payload), nil
@@ -548,6 +548,11 @@ func textFromMatches(value interface{}) (string, error) {
 	matches, ok := value.([]interface{})
 	if !ok {
 		return textFromValue(value)
+	}
+	// No match at all means the path after the wildcard doesn't fit the body (for
+	// example a misspelled key), which must not pass as nothing to screen.
+	if len(matches) == 0 {
+		return "", fmt.Errorf("wildcard JSONPath matched no values")
 	}
 	texts := make([]string, 0, len(matches))
 	for i, match := range matches {
@@ -631,10 +636,15 @@ func isSSE(payload []byte) bool {
 }
 
 // extractSSEText concatenates the streamingJsonPath fragment of every SSE
-// data event. Events where the path doesn't resolve to a string (role-only
-// deltas, finish events, usage events) contribute nothing.
-func extractSSEText(payload []byte, streamingJSONPath string) string {
+// data event. Events where the path doesn't resolve (role-only deltas, finish
+// events, usage events) contribute nothing, and a resolved null (the content
+// of a tool-call-only reply) counts as resolved but adds no text. If events were
+// parsed but the path resolved in none of them, the stream isn't in the shape
+// the path expects (for example a different provider's format), so it is an
+// extraction error rather than a reply with nothing to screen.
+func extractSSEText(payload []byte, streamingJSONPath string) (string, error) {
 	var sb strings.Builder
+	parsed, resolved := 0, 0
 	for _, line := range strings.Split(string(payload), "\n") {
 		line = strings.TrimRight(line, "\r")
 		if !strings.HasPrefix(line, "data:") {
@@ -648,13 +658,20 @@ func extractSSEText(payload []byte, streamingJSONPath string) string {
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			continue
 		}
-		if value, err := utils.ExtractValueFromJsonpath(event, streamingJSONPath); err == nil {
-			if text, ok := value.(string); ok {
-				sb.WriteString(text)
-			}
+		parsed++
+		value, err := utils.ExtractValueFromJsonpath(event, streamingJSONPath)
+		if err != nil {
+			continue
+		}
+		resolved++
+		if text, ok := value.(string); ok {
+			sb.WriteString(text)
 		}
 	}
-	return sb.String()
+	if parsed > 0 && resolved == 0 {
+		return "", fmt.Errorf("streamingJsonPath %q matched none of the %d stream events", streamingJSONPath, parsed)
+	}
+	return sb.String(), nil
 }
 
 // --- Jev API client ---

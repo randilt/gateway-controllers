@@ -101,7 +101,7 @@ Only the configured path is screened. The request default screens the latest mes
 
 Clients send the whole conversation with every request, and the LLM reads all of it. With the default `$.messages[-1].content`, only the newest message is screened, so text placed in an earlier message, for example a jailbreak followed by the message `continue`, isn't screened on that request.
 
-To screen every message, set the request `jsonPath` to `$.messages.*.content`. The messages are joined in order: a `null` content (a tool-call-only reply) contributes nothing, and a content-part array contributes its text parts. This comes with trade-offs:
+To screen every message, set the request `jsonPath` to `$.messages.*.content`. The messages are joined in order: a `null` content (a tool-call-only reply) contributes nothing, and a content-part array contributes its text parts. A wildcard path that matches no value at all, for example because of a misspelled key, is an extraction error handled per `passthroughOnError`. This comes with trade-offs:
 
 - **A blocked message keeps blocking.** If a client keeps a blocked message in the history it sends next, every later request is blocked too, because the LLM would still read it. Clients should remove a blocked message from the conversation before continuing.
 - **Every role is screened,** including the system prompt and assistant replies. Check that your system prompt doesn't trip your own questions.
@@ -117,7 +117,7 @@ Jev screens a complete piece of text, not a stream of fragments — screening ea
 - **Request screening only:** streaming works normally. The policy does not touch the response.
 - **Response screening configured:** streaming is disabled on the route. A streamed (`stream: true`) reply is buffered in full, its text is reassembled from each SSE event using `streamingJsonPath`, screened once, and then delivered to the client in one piece (or replaced by a `422` block).
 
-For providers whose SSE events don't use the OpenAI delta shape, set `streamingJsonPath` accordingly (for example `$.delta.text` for Anthropic `content_block_delta` events).
+For providers whose SSE events don't use the OpenAI delta shape, set `streamingJsonPath` accordingly (for example `$.delta.text` for Anthropic `content_block_delta` events). If `streamingJsonPath` matches none of the stream's events, the reply is treated as an extraction error and handled per `passthroughOnError`, rather than passing as a reply with nothing to screen. A `null` match, such as the content of a tool-call-only reply, counts as a match.
 
 #### Monitor mode
 
