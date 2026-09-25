@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -82,7 +83,7 @@ func answering(nouls map[string]float64) func(w http.ResponseWriter, call int32)
 
 func withDefaultAnswers(nouls map[string]float64) map[string]float64 {
 	full := map[string]float64{"out_of_scope": 0.01}
-	for _, q := range defaultQuestions(false) {
+	for _, q := range defaultQuestions() {
 		full[q.Key] = 0.01
 	}
 	for k, v := range nouls {
@@ -95,7 +96,7 @@ var benignAnswers = withDefaultAnswers(map[string]float64{"destructive": 0.02, "
 
 func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *TypesafeJevMcpToolGuardrailPolicy {
 	t.Helper()
-	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL}
+	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL, "scope": "A test assistant."}
 	for k, v := range extra {
 		params[k] = v
 	}
@@ -188,7 +189,22 @@ func TestGetPolicy_Params(t *testing.T) {
 		{name: "defaults", params: map[string]interface{}{"apiKey": "k"}},
 		{name: "missing apiKey", params: map[string]interface{}{}, wantErr: "'apiKey' parameter is required"},
 		{name: "empty apiKey", params: map[string]interface{}{"apiKey": ""}, wantErr: "'apiKey' must be a non-empty string"},
-		{name: "scope not a string", params: map[string]interface{}{"apiKey": "k", "scope": 3}, wantErr: "'scope' must be a string"},
+		{name: "missing scope", params: map[string]interface{}{"apiKey": "k", "scope": nil}, wantErr: "'scope' is required"},
+		{name: "blank scope", params: map[string]interface{}{"apiKey": "k", "scope": "   "}, wantErr: "'scope' is required"},
+		{name: "scope not a string", params: map[string]interface{}{"apiKey": "k", "scope": 3}, wantErr: "'scope' is required"},
+		{name: "tools not an array", params: map[string]interface{}{"apiKey": "k", "tools": "orderPizza"}, wantErr: "'tools' must be an array"},
+		{name: "tool rule without name", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"scope": "x"}}}, wantErr: "'tools[0].name' is required"},
+		{name: "duplicate tool rule", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add", "scope": "x"}, map[string]interface{}{"name": "add", "scope": "y"}}}, wantErr: "is a duplicate"},
+		{name: "tool rule with nothing to override", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add"}}}, wantErr: "must set 'scope', 'questions', or both"},
+		{name: "tool rule with an invalid question", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 2}}}}},
+			wantErr: "'tools[0]': 'questions[0].threshold'"},
+		{name: "valid tool rules", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "orderPizza", "scope": "A pizza ordering assistant."},
+			map[string]interface{}{"name": "add", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 0.5}}}}}},
 		{name: "bad mode", params: map[string]interface{}{"apiKey": "k", "mode": "block"}, wantErr: "'mode' must be"},
 		{name: "bad timeout", params: map[string]interface{}{"apiKey": "k", "timeout": "soon"}, wantErr: "not a valid duration"},
 		{name: "timeout too long", params: map[string]interface{}{"apiKey": "k", "timeout": "31s"}, wantErr: "at most 30s"},
@@ -259,6 +275,10 @@ func TestGetPolicy_Params(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Every case gets a valid scope unless it sets its own.
+			if _, ok := tt.params["scope"]; !ok && tt.params["apiKey"] != nil {
+				tt.params["scope"] = "A test assistant."
+			}
 			_, err := GetPolicy(policy.PolicyMetadata{}, tt.params)
 			if tt.wantErr == "" {
 				if err != nil {
@@ -273,45 +293,51 @@ func TestGetPolicy_Params(t *testing.T) {
 	}
 }
 
-func TestDefaultQuestions_OutOfScopeOnlyWithScope(t *testing.T) {
-	keys := func(qs []guardrailQuestion) []string {
-		var out []string
-		for _, q := range qs {
-			out = append(out, q.Key)
-		}
-		return out
-	}
-	const effects = "destructive,irreversible,exfiltration,sensitive_data,privilege,disruption,security_control"
-	without := newPolicy(t, "http://unused", nil)
-	if got := strings.Join(keys(without.questions), ","); got != effects {
-		t.Fatalf("questions without scope = %s", got)
-	}
-	with := newPolicy(t, "http://unused", map[string]interface{}{"scope": "  A calculator assistant.  "})
-	if got := strings.Join(keys(with.questions), ","); got != effects+",out_of_scope" {
-		t.Fatalf("questions with scope = %s", got)
-	}
-	if with.scope != "A calculator assistant." {
-		t.Fatalf("scope = %q, want trimmed", with.scope)
-	}
-	for _, q := range with.questions {
+func TestDefaultQuestions(t *testing.T) {
+	var keys []string
+	scopedKeys := map[string]bool{"destructive": true, "irreversible": true, "privilege": true, "disruption": true, "out_of_scope": true}
+	for _, q := range defaultQuestions() {
+		keys = append(keys, q.Key)
 		if q.Type != questionTypeNoul || q.Threshold != defaultThreshold {
 			t.Fatalf("default question %q = %s/%v, want noul/%v", q.Key, q.Type, q.Threshold, defaultThreshold)
 		}
+		// The questions that judge an effect exclude what the scope calls for; the
+		// data and security questions don't mention it.
+		if got := strings.Contains(q.Instructions, "`scope`"); got != scopedKeys[q.Key] {
+			t.Fatalf("question %q refers to scope = %v, want %v: %s", q.Key, got, scopedKeys[q.Key], q.Instructions)
+		}
+	}
+	const want = "destructive,irreversible,exfiltration,sensitive_data,privilege,disruption,security_control,out_of_scope"
+	if got := strings.Join(keys, ","); got != want {
+		t.Fatalf("default questions = %s, want %s", got, want)
+	}
+
+	p := newPolicy(t, "http://unused", map[string]interface{}{"scope": "  A calculator assistant.  "})
+	if p.scope != "A calculator assistant." {
+		t.Fatalf("scope = %q, want trimmed", p.scope)
+	}
+	if len(p.questions) != len(defaultBattery) {
+		t.Fatalf("omitted questions gave %d questions, want the %d defaults", len(p.questions), len(defaultBattery))
 	}
 }
 
-// Without a scope no question may refer to one; with a scope, the questions that
-// judge an effect exclude what the scope calls for.
-func TestDefaultQuestions_ScopeAwareWording(t *testing.T) {
-	scopedKeys := map[string]bool{"destructive": true, "irreversible": true, "privilege": true, "disruption": true, "out_of_scope": true}
-	for _, q := range defaultQuestions(false) {
-		if strings.Contains(q.Instructions, "`scope`") {
-			t.Fatalf("question %q refers to scope without one configured: %s", q.Key, q.Instructions)
-		}
+// The policy definition shows the default questions in the UI, so they must be
+// the same questions the policy falls back to when none are configured.
+func TestDefaultQuestions_MatchPolicyDefinition(t *testing.T) {
+	definition, err := os.ReadFile("policy-definition.yaml")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, q := range defaultQuestions(true) {
-		if got := strings.Contains(q.Instructions, "`scope`"); got != scopedKeys[q.Key] {
-			t.Fatalf("question %q refers to scope = %v, want %v: %s", q.Key, got, scopedKeys[q.Key], q.Instructions)
+	def := string(definition)
+	if got := strings.Count(def, "\n          instructions: \""); got != len(defaultBattery) {
+		t.Fatalf("policy definition lists %d default questions, want %d", got, len(defaultBattery))
+	}
+	for _, q := range defaultQuestions() {
+		if !strings.Contains(def, "- key: "+q.Key+"\n") {
+			t.Errorf("policy definition default is missing key %q", q.Key)
+		}
+		if !strings.Contains(def, "instructions: \""+q.Instructions+"\"\n") {
+			t.Errorf("policy definition default for %q doesn't match the code: %s", q.Key, q.Instructions)
 		}
 	}
 }
@@ -410,12 +436,12 @@ func TestOnRequestBody_SendsToolCallStateAndQuestions(t *testing.T) {
 	if sent.State.Scope != "A support assistant." {
 		t.Fatalf("state.scope = %q", sent.State.Scope)
 	}
-	if len(sent.Questions) != len(defaultBattery)+1 || sent.Questions["out_of_scope"].Type != "noul" {
+	if len(sent.Questions) != len(defaultBattery) || sent.Questions["out_of_scope"].Type != "noul" {
 		t.Fatalf("questions = %+v", sent.Questions)
 	}
 }
 
-func TestOnRequestBody_OmitsScopeAndMissingArguments(t *testing.T) {
+func TestOnRequestBody_OmitsMissingArguments(t *testing.T) {
 	jev := newMockJev(t, answering(benignAnswers))
 	p := newPolicy(t, jev.server.URL, nil)
 
@@ -424,9 +450,6 @@ func TestOnRequestBody_OmitsScopeAndMissingArguments(t *testing.T) {
 
 	var sent map[string]map[string]interface{}
 	_ = json.Unmarshal(jev.lastBody.Load().([]byte), &sent)
-	if _, ok := sent["state"]["scope"]; ok {
-		t.Fatalf("state has scope without one configured: %v", sent["state"])
-	}
 	tool := sent["state"]["tool"].(map[string]interface{})
 	if _, ok := tool["arguments"]; ok {
 		t.Fatalf("state.tool has arguments the call didn't send: %v", tool)
@@ -813,5 +836,50 @@ func TestErrorSnippet_TruncatesLongBodies(t *testing.T) {
 	}
 	if got := errorSnippet([]byte("short")); got != "short" {
 		t.Fatalf("errorSnippet(short) = %q", got)
+	}
+}
+
+// A tool rule replaces the scope and/or questions for that tool only; other tools
+// keep the proxy-wide ones.
+func TestOnRequestBody_ToolRulesOverrideScopeAndQuestions(t *testing.T) {
+	type sentRequest struct {
+		State struct {
+			Tool struct {
+				Name string `json:"name"`
+			} `json:"tool"`
+			Scope string `json:"scope"`
+		} `json:"state"`
+		Questions map[string]json.RawMessage `json:"questions"`
+	}
+	jev := newMockJev(t, func(w http.ResponseWriter, _ int32) {
+		// Every question any rule can ask, all low.
+		_, _ = w.Write(jevAnswers(withDefaultAnswers(map[string]float64{"pizza_limit": 0.01})))
+	})
+	p := newPolicy(t, jev.server.URL, map[string]interface{}{
+		"scope": "A calculator assistant.",
+		"tools": []interface{}{
+			map[string]interface{}{"name": "orderPizza", "scope": "A pizza ordering assistant."},
+			map[string]interface{}{"name": "viewPizzaMenu", "questions": []interface{}{
+				map[string]interface{}{"key": "pizza_limit", "type": "noul", "instructions": "Does `tool` look at more than one menu?", "threshold": 0.7}}},
+		},
+	})
+	sent := func(tool string) sentRequest {
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`
+		mustPassthrough(t, p.OnRequestBody(context.Background(), mcpRequest(body, nil), nil))
+		var got sentRequest
+		if err := json.Unmarshal(jev.lastBody.Load().([]byte), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	if got := sent("orderPizza"); got.State.Scope != "A pizza ordering assistant." || len(got.Questions) != len(defaultBattery) {
+		t.Fatalf("orderPizza: scope %q, %d questions; want the rule's scope and the default questions", got.State.Scope, len(got.Questions))
+	}
+	if got := sent("viewPizzaMenu"); got.State.Scope != "A calculator assistant." || len(got.Questions) != 1 || got.Questions["pizza_limit"] == nil {
+		t.Fatalf("viewPizzaMenu: scope %q, questions %v; want the proxy scope and only the rule's question", got.State.Scope, got.Questions)
+	}
+	if got := sent("add"); got.State.Scope != "A calculator assistant." || len(got.Questions) != len(defaultBattery) {
+		t.Fatalf("add: scope %q, %d questions; want the proxy-wide scope and questions", got.State.Scope, len(got.Questions))
 	}
 }

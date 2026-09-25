@@ -9,31 +9,34 @@ description: |
 
 parameters:
   type: object
+  required: [scope]
   properties:
     scope:
       type: string
+      minLength: 1
       x-wso2-policy-advanced-param: false
       description: |
         What the agent using this MCP server is meant to do, in plain words
-        (for example "A customer support assistant that looks up orders").
-        When set, the default "destructive", "irreversible", "privilege" and
-        "disruption" questions ignore effects the scope calls for, and the
-        default questions also ask whether a tool call falls outside it.
-        "exfiltration", "sensitive_data" and "security_control" still apply
-        to in-scope calls. The MCP proxy doesn't see the agent's
-        conversation, so this text is the only scope Jev can judge against.
+        (for example "A customer support assistant that looks up orders and
+        issues refunds of up to 100 USD"). Describe the job rather than giving
+        instructions: Jev judges whether each call fits it. The default
+        "destructive", "irreversible", "privilege" and "disruption" questions
+        ignore effects the scope calls for, and "out_of_scope" flags calls
+        outside it. "exfiltration", "sensitive_data" and "security_control"
+        don't mention the scope, but Jev still sees it, so a job that clearly
+        involves that data can lower their answers too. The MCP proxy doesn't
+        see the agent's conversation, so this text is the only scope Jev can
+        judge against.
     questions:
       type: array
       x-wso2-policy-advanced-param: false
       description: |
-        The battery of typed questions to ask Jev about each tool call. Jev
-        sees a JSON state with "tool" ("name" and "arguments") and "scope";
-        refer to them in instructions, for example `tool.arguments`. Leave
-        empty to use the default battery of noul questions, each blocking at
-        0.7: "destructive", "irreversible", "exfiltration", "sensitive_data",
-        "privilege", "disruption" and "security_control", plus "out_of_scope"
-        when 'scope' is set. The call is blocked if any question's answer is
-        at or above its threshold.
+        The typed questions to ask Jev about each tool call, pre-filled with
+        the defaults; edit, remove, or add questions as needed. Jev sees a
+        JSON state with "tool" ("name" and "arguments") and "scope"; refer to
+        them in instructions, for example `tool.arguments`. The call is
+        blocked if any question's answer is at or above its threshold. If the
+        list is empty, the defaults are used.
       items:
         type: object
         required: [key, type, instructions, threshold]
@@ -77,6 +80,93 @@ parameters:
               for a score at or above 'threshold' to block. A less confident
               answer doesn't block and is recorded in request metadata instead.
               Omit or set to 0 to block on the score alone.
+      default:
+        - key: destructive
+          type: noul
+          instructions: "Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated, in a way that `scope` does not call for?"
+          threshold: 0.7
+        - key: irreversible
+          type: noul
+          instructions: "Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something, that `scope` does not call for?"
+          threshold: 0.7
+        - key: exfiltration
+          type: noul
+          instructions: "Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation?"
+          threshold: 0.7
+        - key: sensitive_data
+          type: noul
+          instructions: "Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data?"
+          threshold: 0.7
+        - key: privilege
+          type: noul
+          instructions: "Would running the tool call in `tool` grant or raise access rights or permissions in a way that `scope` does not call for?"
+          threshold: 0.7
+        - key: disruption
+          type: noul
+          instructions: "Would running the tool call in `tool` stop, shut down, or take offline a running service or system in a way that `scope` does not call for?"
+          threshold: 0.7
+        - key: security_control
+          type: noul
+          instructions: "Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging?"
+          threshold: 0.7
+        - key: out_of_scope
+          type: noul
+          instructions: "Is the tool call in `tool` unrelated to the purpose described in `scope`?"
+          threshold: 0.7
+    tools:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Optional per-tool rules. A rule names one tool exactly as it appears
+        in tools/call, and replaces the scope and/or the questions for that
+        tool's calls; every other tool uses the scope and questions above.
+      items:
+        type: object
+        required: [name]
+        properties:
+          name:
+            type: string
+            minLength: 1
+            maxLength: 256
+            description: The tool name, exactly as it appears in tools/call params.name.
+          scope:
+            type: string
+            description: The scope to judge this tool's calls against, instead of the proxy-wide scope.
+          questions:
+            type: array
+            description: The questions to ask for this tool's calls, instead of the proxy-wide questions.
+            items:
+              type: object
+              required: [key, type, instructions, threshold]
+              properties:
+                key:
+                  type: string
+                  description: Unique identifier for this question, used in the block assessment.
+                type:
+                  type: string
+                  enum: [noul, score, choice]
+                  description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
+                instructions:
+                  type: string
+                  description: The question to ask Jev about the tool call.
+                criteria:
+                  type: array
+                  items:
+                    type: string
+                  description: Required for types 'score' and 'choice', as for the proxy-wide questions.
+                blockOn:
+                  type: array
+                  items:
+                    type: string
+                  description: Required for type 'choice'. The 'criteria' options that count towards blocking.
+                threshold:
+                  type: number
+                  description: The same meaning as for the proxy-wide questions.
+                confidenceThreshold:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Only for type 'score', as for the proxy-wide questions.
     mode:
       type: string
       enum: [enforce, monitor]

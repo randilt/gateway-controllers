@@ -23,7 +23,9 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 ## Features
 
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
-- Default question battery covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive and security-weakening calls; with `scope` set, the destructive, irreversible, privilege and disruption questions don't flag effects the scope calls for, and calls outside the scope are flagged
+- Default questions covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive, security-weakening and out-of-scope calls; the destructive, irreversible, privilege and disruption questions don't flag effects the scope calls for
+- The default questions are pre-filled in the policy configuration, so they can be seen and edited
+- Per-tool rules: give a named tool its own scope and/or questions
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
 - Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was sent with `Content-Type: text/event-stream`
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
@@ -60,8 +62,9 @@ jev_model = "jev-latest"
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope`: the default `destructive`, `irreversible`, `privilege` and `disruption` questions then ignore effects the scope calls for, and the `out_of_scope` question is added. `exfiltration`, `sensitive_data` and `security_control` still flag such calls even when the scope covers them. |
-| `questions` | array of objects | No | See [default battery](#default-question-battery) | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
+| `scope` | string | Yes | — | What the agent using this MCP server is meant to do, in plain words. It is sent to Jev as `scope`: the default `destructive`, `irreversible`, `privilege` and `disruption` questions ignore effects the scope calls for, and `out_of_scope` flags calls outside it. `exfiltration`, `sensitive_data` and `security_control` don't mention the scope, but Jev still sees it, so a job that clearly involves that data can lower their answers too: a raw card number passed to `orderPizza` was flagged under "A calculator and pizza ordering assistant…", but not under "A pizza ordering assistant that places pizza orders for the customer.". Describe the job rather than giving instructions: "A calculator and pizza ordering assistant that adds numbers and places pizza orders" works, while "A calculator assistant; allow pizza ordering" doesn't, because Jev judges whether each call fits the job described. |
+| `questions` | array of objects | No | The [default questions](#default-questions), pre-filled | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
+| `tools` | array of objects | No | — | Per-tool rules; see [Per-tool rules](#per-tool-rules). |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
 | `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
 | `passthroughOnError` | boolean | No | `false` | When `true`, lets the call through if the Jev API call fails or times out (fail-open). When `false`, the call is rejected with a JSON-RPC internal error (fail-closed). |
@@ -79,22 +82,46 @@ jev_model = "jev-latest"
 | `threshold` | number | Yes | For `noul`: minimum probability (0–1) to block. For `score`: minimum scale position to block. For `choice`: minimum combined probability (0–1) of the `blockOn` options to block. |
 | `confidenceThreshold` | number | No (`score` only) | Minimum confidence (0–1) Jev must report for a `score` at or above `threshold` to block. A less confident answer doesn't block; it is recorded in request metadata under `typesafe-jev-mcp-tool-guardrail:low-confidence`. |
 
-#### Default question battery
+#### Default questions
 
-When `questions` is omitted or empty, the policy asks these `noul` questions, each blocking at `0.7`:
+The `questions` parameter is pre-filled with these `noul` questions, each blocking at `0.7`, so they can be seen and edited in the policy configuration. If `questions` is omitted or empty, the same questions are used.
 
 | Key | Instructions |
 |-----|--------------|
-| `destructive` | Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated? |
-| `irreversible` | Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something? |
+| `destructive` | Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated, in a way that `scope` does not call for? |
+| `irreversible` | Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something, that `scope` does not call for? |
 | `exfiltration` | Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation? |
 | `sensitive_data` | Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data? |
-| `privilege` | Would running the tool call in `tool` grant or raise access rights or permissions? |
-| `disruption` | Would running the tool call in `tool` stop, shut down, or take offline a running service or system? |
+| `privilege` | Would running the tool call in `tool` grant or raise access rights or permissions in a way that `scope` does not call for? |
+| `disruption` | Would running the tool call in `tool` stop, shut down, or take offline a running service or system in a way that `scope` does not call for? |
 | `security_control` | Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging? |
-| `out_of_scope` | Is the tool call in `tool` unrelated to the purpose described in `scope`? Only asked when `scope` is set. |
+| `out_of_scope` | Is the tool call in `tool` unrelated to the purpose described in `scope`? |
 
-When `scope` is set, `destructive`, `irreversible`, `privilege` and `disruption` also exclude what the scope calls for. For example, `destructive` becomes "… that cannot easily be recreated, in a way that `scope` does not call for?". This keeps the guardrail from blocking the work the agent exists to do, such as a support assistant replying to a customer or issuing a refund within its limit.
+The questions that mention `scope` keep the guardrail from blocking the work the agent exists to do, such as a support assistant replying to a customer or issuing a refund within its limit, while still flagging calls outside that job. This is why `scope` is required: without one, these questions have nothing to compare against.
+
+#### Per-tool rules
+
+MCP proxies take policies for the whole proxy, so per-tool settings go in the `tools` parameter. Each rule names one tool, exactly as it appears in `tools/call` (`params.name`), and replaces the scope and/or the questions for that tool's calls. Tools without a rule use the proxy-wide `scope` and `questions`.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | The tool name. Each tool can have one rule. |
+| `scope` | string | No | The scope to judge this tool's calls against, instead of the proxy-wide `scope`. |
+| `questions` | array of objects | No | The questions to ask for this tool's calls, instead of the proxy-wide `questions`. Same shape as [`questions`](#question-object-shape). |
+
+A rule must set `scope`, `questions`, or both. For example, a calculator assistant whose MCP server also has a pizza ordering tool:
+
+```yaml
+params:
+  scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
+  tools:
+    - name: orderPizza
+      scope: "A pizza ordering assistant that places pizza orders for the customer."
+```
+
+Calls to `orderPizza` are judged against the pizza ordering scope; every other tool is judged against the calculator scope.
+
+A rule's `questions` replace the proxy-wide questions for that tool; they aren't added to them. To keep the default questions for a tool and add one of your own, list the defaults in the rule too.
 
 #### What is screened
 
@@ -170,9 +197,9 @@ Inside the `api-platform` repository, add the policy package under `policies:` i
 
 ## Reference Scenarios
 
-### Example 1: Screen Tool Calls with the Default Battery
+### Example 1: Screen Tool Calls with the Default Questions
 
-Attach the policy to an MCP proxy with a `scope`, to use the default battery including the out-of-scope question:
+Attach the policy to an MCP proxy with a `scope`, to use the default questions:
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1
@@ -216,13 +243,14 @@ curl -X POST http://localhost:8080/support-tools/mcp \
 
 ### Example 2: Custom Questions with Assessment Details
 
-Replace the default battery with a risk scale and a destination check, and include the assessment in blocked responses:
+Replace the default questions with a risk scale and a destination check, and include the assessment in blocked responses:
 
 ```yaml
 policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
+      scope: "A support assistant that looks up orders and replies to customers by email."
       showAssessment: true
       questions:
         - key: risk
@@ -243,13 +271,14 @@ policies:
 
 ### Example 3: Monitor Before Enforcing, Fail-Open on Outage
 
-Run the default battery in monitor mode first, and let calls through if Jev is unavailable:
+Run the default questions in monitor mode first, and let calls through if Jev is unavailable:
 
 ```yaml
 policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
+      scope: "A support assistant that looks up orders and replies to customers by email."
       mode: monitor
       passthroughOnError: true
       timeout: "2s"

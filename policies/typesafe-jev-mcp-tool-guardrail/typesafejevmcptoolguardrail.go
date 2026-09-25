@@ -23,11 +23,12 @@
 // or, in monitor mode, only recorded.
 //
 // The default battery asks whether the call is destructive, irreversible, sends
-// private data out, reads secrets, raises privileges, disrupts a running system, or
-// weakens a security control. When the operator configures a scope, effects the
-// scope calls for aren't flagged and a call outside the scope is. The MCP proxy
-// never sees the agent's conversation, so scope is judged against that configured
-// text only.
+// private data out, reads secrets, raises privileges, disrupts a running system,
+// weakens a security control, or falls outside the scope. The scope is required: it
+// describes the agent's job, so effects it calls for aren't flagged and a call
+// outside it is. Per-tool rules can give a named tool its own scope or questions.
+// The MCP proxy never sees the agent's conversation, so scope is judged against
+// the configured text only.
 package typesafejevmcptoolguardrail
 
 import (
@@ -114,81 +115,44 @@ type guardrailQuestion struct {
 	ConfidenceThreshold float64
 }
 
-// defaultQuestion is one default question's wording, with and without a
-// configured scope. With a scope, the questions that judge an effect exclude
-// effects the scope calls for (a support assistant replying to a customer, a
-// coding assistant deleting a build directory); an empty scoped wording means the
-// question reads the same either way.
-type defaultQuestion struct {
-	key    string
-	plain  string
-	scoped string
-}
-
-// defaultBattery was tuned against jev-1.13.0 on hand-labelled tool calls, with
+// defaultBattery is the question list used when "questions" isn't configured,
+// and the default the policy definition shows (keep the two identical; a test
+// checks it). It was tuned against jev-1.13.0 on hand-labelled tool calls, with
 // exactly this wording. Each question covers one kind of harm, since a Noul is
-// most accurate on a single judgement.
-var defaultBattery = []defaultQuestion{
-	{
-		key:    "destructive",
-		plain:  "Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated?",
-		scoped: "Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated, in a way that `scope` does not call for?",
-	},
-	{
-		key:    "irreversible",
-		plain:  "Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something?",
-		scoped: "Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something, that `scope` does not call for?",
-	},
-	{
-		key:   "exfiltration",
-		plain: "Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation?",
-	},
-	{
-		key:   "sensitive_data",
-		plain: "Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data?",
-	},
-	{
-		key:    "privilege",
-		plain:  "Would running the tool call in `tool` grant or raise access rights or permissions?",
-		scoped: "Would running the tool call in `tool` grant or raise access rights or permissions in a way that `scope` does not call for?",
-	},
-	{
-		key:    "disruption",
-		plain:  "Would running the tool call in `tool` stop, shut down, or take offline a running service or system?",
-		scoped: "Would running the tool call in `tool` stop, shut down, or take offline a running service or system in a way that `scope` does not call for?",
-	},
-	{
-		key:   "security_control",
-		plain: "Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging?",
-	},
+// most accurate on a single judgement. The questions that judge an effect exclude
+// effects the scope calls for, so a support assistant replying to a customer
+// isn't flagged. exfiltration, sensitive_data and security_control don't mention
+// the scope, but Jev still sees it, so a job that clearly involves that data (a
+// pizza ordering assistant taking a card) can lower their answers too.
+var defaultBattery = []struct{ key, instructions string }{
+	{"destructive", "Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated, in a way that `scope` does not call for?"},
+	{"irreversible", "Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something, that `scope` does not call for?"},
+	{"exfiltration", "Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation?"},
+	{"sensitive_data", "Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data?"},
+	{"privilege", "Would running the tool call in `tool` grant or raise access rights or permissions in a way that `scope` does not call for?"},
+	{"disruption", "Would running the tool call in `tool` stop, shut down, or take offline a running service or system in a way that `scope` does not call for?"},
+	{"security_control", "Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging?"},
+	{"out_of_scope", "Is the tool call in `tool` unrelated to the purpose described in `scope`?"},
 }
 
-// defaultQuestions is the battery used when "questions" isn't configured. With a
-// scope, the effect questions use their scoped wording and an out-of-scope
-// question is added; without one, neither has anything to compare against.
-func defaultQuestions(hasScope bool) []guardrailQuestion {
-	questions := make([]guardrailQuestion, 0, len(defaultBattery)+1)
+func defaultQuestions() []guardrailQuestion {
+	questions := make([]guardrailQuestion, 0, len(defaultBattery))
 	for _, d := range defaultBattery {
-		instructions := d.plain
-		if hasScope && d.scoped != "" {
-			instructions = d.scoped
-		}
 		questions = append(questions, guardrailQuestion{
 			Key:          d.key,
 			Type:         questionTypeNoul,
-			Instructions: instructions,
-			Threshold:    defaultThreshold,
-		})
-	}
-	if hasScope {
-		questions = append(questions, guardrailQuestion{
-			Key:          "out_of_scope",
-			Type:         questionTypeNoul,
-			Instructions: "Is the tool call in `tool` unrelated to the purpose described in `scope`?",
+			Instructions: d.instructions,
 			Threshold:    defaultThreshold,
 		})
 	}
 	return questions
+}
+
+// toolRule overrides the scope and/or the questions for one tool. An empty scope
+// or nil questions means the proxy-wide value is used.
+type toolRule struct {
+	scope     string
+	questions []guardrailQuestion
 }
 
 // TypesafeJevMcpToolGuardrailPolicy implements a Jev-backed guardrail for MCP tool calls.
@@ -200,6 +164,7 @@ type TypesafeJevMcpToolGuardrailPolicy struct {
 
 	scope              string
 	questions          []guardrailQuestion
+	tools              map[string]toolRule
 	mode               string
 	timeout            time.Duration
 	passthroughOnError bool
@@ -231,7 +196,7 @@ func GetPolicy(
 	}
 
 	slog.Debug("TypesafeJevMcpToolGuardrail: Policy initialized",
-		"questions", len(p.questions), "hasScope", p.scope != "", "mode", p.mode)
+		"questions", len(p.questions), "toolRules", len(p.tools), "mode", p.mode)
 
 	return p, nil
 }
@@ -391,11 +356,20 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *
 			"MCP tool call could not be checked by guardrail", call.ID, nil)
 	}
 
+	scope, questions := p.scope, p.questions
+	if rule, ok := p.tools[call.Name]; ok {
+		if rule.scope != "" {
+			scope = rule.scope
+		}
+		if rule.questions != nil {
+			questions = rule.questions
+		}
+	}
 	state := toolCallState{
 		Tool:  toolCallStateTool{Name: call.Name, Arguments: call.Arguments},
-		Scope: p.scope,
+		Scope: scope,
 	}
-	answers, usage, err := p.callJev(ctx, state, p.questions, p.timeout)
+	answers, usage, err := p.callJev(ctx, state, questions, p.timeout)
 	if err != nil {
 		return failure("Error calling Jev API", err)
 	}
@@ -406,7 +380,7 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *
 	}
 
 	var failed, lowConfidence []map[string]interface{}
-	for _, q := range p.questions {
+	for _, q := range questions {
 		raw, ok := answers[q.Key]
 		if !ok {
 			// A partial Jev response is a failure of the check, not a pass: a
@@ -941,12 +915,11 @@ func stringParamOrDefault(params map[string]interface{}, key, def string) string
 }
 
 func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interface{}) error {
-	if scopeRaw, ok := params["scope"]; ok {
-		scope, ok := scopeRaw.(string)
-		if !ok {
-			return fmt.Errorf("'scope' must be a string")
-		}
-		p.scope = strings.TrimSpace(scope)
+	scope, _ := params["scope"].(string)
+	p.scope = strings.TrimSpace(scope)
+	if p.scope == "" {
+		// The default questions judge each call against the scope, so it can't be left out.
+		return fmt.Errorf("'scope' is required: describe, in plain words, what the agent using this MCP server is meant to do")
 	}
 
 	if modeRaw, ok := params["mode"]; ok {
@@ -988,39 +961,100 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interf
 		p.showAssessment = showAssessment
 	}
 
-	questionsRaw, ok := params["questions"]
-	if !ok {
-		p.questions = defaultQuestions(p.scope != "")
-		return nil
+	questions, err := parseQuestionList(params["questions"])
+	if err != nil {
+		return err
 	}
-	questionsList, ok := questionsRaw.([]interface{})
-	if !ok {
-		return fmt.Errorf("'questions' must be an array")
+	if questions == nil {
+		questions = defaultQuestions()
 	}
-	if len(questionsList) == 0 {
-		p.questions = defaultQuestions(p.scope != "")
-		return nil
-	}
+	p.questions = questions
 
-	questions := make([]guardrailQuestion, 0, len(questionsList))
-	seenKeys := make(map[string]bool, len(questionsList))
-	for i, item := range questionsList {
+	tools, err := parseToolRules(params["tools"])
+	if err != nil {
+		return err
+	}
+	p.tools = tools
+	return nil
+}
+
+// parseQuestionList returns nil (not an error) when raw is absent or empty, so
+// the caller can fall back to its default questions.
+func parseQuestionList(raw interface{}) ([]guardrailQuestion, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("'questions' must be an array")
+	}
+	if len(list) == 0 {
+		return nil, nil
+	}
+	questions := make([]guardrailQuestion, 0, len(list))
+	seenKeys := make(map[string]bool, len(list))
+	for i, item := range list {
 		qMap, ok := item.(map[string]interface{})
 		if !ok {
-			return fmt.Errorf("'questions[%d]' must be an object", i)
+			return nil, fmt.Errorf("'questions[%d]' must be an object", i)
 		}
 		q, err := parseQuestion(qMap, i)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if seenKeys[q.Key] {
-			return fmt.Errorf("'questions[%d].key' %q is a duplicate; question keys must be unique", i, q.Key)
+			return nil, fmt.Errorf("'questions[%d].key' %q is a duplicate; question keys must be unique", i, q.Key)
 		}
 		seenKeys[q.Key] = true
 		questions = append(questions, q)
 	}
-	p.questions = questions
-	return nil
+	return questions, nil
+}
+
+// parseToolRules reads the per-tool overrides. Each rule names one tool exactly,
+// as it appears in tools/call params.name; tools without a rule use the
+// proxy-wide scope and questions.
+func parseToolRules(raw interface{}) (map[string]toolRule, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("'tools' must be an array")
+	}
+	rules := make(map[string]toolRule, len(list))
+	for i, item := range list {
+		ruleMap, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("'tools[%d]' must be an object", i)
+		}
+		name, _ := ruleMap["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("'tools[%d].name' is required and must be a non-empty string", i)
+		}
+		if _, dup := rules[name]; dup {
+			return nil, fmt.Errorf("'tools[%d].name' %q is a duplicate; each tool can have only one rule", i, name)
+		}
+		var rule toolRule
+		if scopeRaw, ok := ruleMap["scope"]; ok {
+			scope, ok := scopeRaw.(string)
+			if !ok {
+				return nil, fmt.Errorf("'tools[%d].scope' must be a string", i)
+			}
+			rule.scope = strings.TrimSpace(scope)
+		}
+		questions, err := parseQuestionList(ruleMap["questions"])
+		if err != nil {
+			return nil, fmt.Errorf("'tools[%d]': %w", i, err)
+		}
+		rule.questions = questions
+		if rule.scope == "" && rule.questions == nil {
+			return nil, fmt.Errorf("'tools[%d]' must set 'scope', 'questions', or both", i)
+		}
+		rules[name] = rule
+	}
+	return rules, nil
 }
 
 func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, error) {
