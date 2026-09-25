@@ -21,7 +21,10 @@ parameters:
           description: |
             Extract text with JSONPath for screening. When the value is an
             array of multimodal content parts, only the text parts are
-            screened.
+            screened. The default screens the newest message only; use
+            "$.messages.*.content" (or "$.messages[*].content") to screen
+            every message, keeping the newest messages up to 48 KB. Clients
+            must then remove a blocked message from the history they send.
           default: "$.messages[-1].content"
         questions:
           type: array

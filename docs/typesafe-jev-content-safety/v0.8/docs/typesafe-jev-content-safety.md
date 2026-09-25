@@ -54,7 +54,7 @@ At least one of `request` or `response` is required. Each carries its own indepe
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `$.messages[-1].content` (request), `$.choices[0].message.content` (response) | JSONPath expression used to extract the text to screen. The value may be a string, a number, or an array of multimodal content parts (only the `text` parts are screened). A `null` value (for example a tool-call-only reply) has nothing to screen and passes through. A non-JSON body, a missing path, or any other value is an extraction error, handled per `passthroughOnError`. |
+| `jsonPath` | string | No | `$.messages[-1].content` (request), `$.choices[0].message.content` (response) | JSONPath expression used to extract the text to screen. The value may be a string, a number, or an array of multimodal content parts (only the `text` parts are screened). A wildcard such as `$.messages.*.content` (or `$.messages[*].content`) screens every message in the request; see [Screening the whole conversation](#screening-the-whole-conversation). A `null` value (for example a tool-call-only reply) has nothing to screen and passes through. A non-JSON body, a missing path, or any other value is an extraction error, handled per `passthroughOnError`. |
 | `streamingJsonPath` | string | No | `$.choices[0].delta.content` | Response only. JSONPath used to extract text from each event of a streamed (`stream: true`) response. See [Streaming](#streaming). |
 | `questions` | array of objects | No | See [default battery](#default-question-battery) below | The typed questions to ask Jev. The request/response is blocked if any question's answer is at or above its threshold. |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
@@ -87,13 +87,27 @@ When `questions` is omitted, both phases default to:
 
 #### JSONPath Targeting
 
-The `jsonPath` parameter uses simple dot-separated traversal and supports array indexing including negative indexes:
+The `jsonPath` parameter uses simple dot-separated traversal and supports array indexing, including negative indexes, and a `*` wildcard:
 
 - `$.messages[-1].content` — last message in a chat completions array (request default)
+- `$.messages.*.content` or `$.messages[*].content` — every message in the request
 - `$.choices[0].message.content` — first choice's message content (response default)
 - `$.input` — top-level string field
 
 Only the configured path is screened. The request default screens the latest message rather than the whole conversation, so an earlier message the user has moved on from doesn't keep blocking later turns, and long conversations don't run into Jev's input limit.
+
+#### Screening the whole conversation
+
+Clients send the whole conversation with every request, and the LLM reads all of it. With the default `$.messages[-1].content`, only the newest message is screened, so text placed in an earlier message, for example a jailbreak followed by the message `continue`, isn't screened on that request.
+
+To screen every message, set the request `jsonPath` to `$.messages.*.content`. The messages are joined in order: a `null` content (a tool-call-only reply) contributes nothing, and a content-part array contributes its text parts. This comes with trade-offs:
+
+- **A blocked message keeps blocking.** If a client keeps a blocked message in the history it sends next, every later request is blocked too, because the LLM would still read it. Clients should remove a blocked message from the conversation before continuing.
+- **Every role is screened,** including the system prompt and assistant replies. Check that your system prompt doesn't trip your own questions.
+- **Screening cost grows with the conversation,** since each request screens all of it again.
+- **The oldest messages are dropped past 48 KB.** To stay within Jev's input limit, the newest messages are kept whole and the oldest are dropped once the joined text passes 48 KB, so a message buried under that much later text isn't screened. The newest message is always kept, even when it alone passes the limit; Jev then rejects it, and `passthroughOnError` decides what happens.
+
+Screening responses as well limits what an unscreened message can achieve, because the reply it produces is screened whatever the history contains.
 
 #### Streaming
 

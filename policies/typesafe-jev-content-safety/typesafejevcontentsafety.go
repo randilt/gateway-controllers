@@ -64,6 +64,14 @@ const (
 	questionTypeScore  = "score"
 	questionTypeChoice = "choice"
 
+	// maxScreenedTextBytes bounds the text screened when jsonPath selects several
+	// messages (a wildcard such as "$.messages.*.content"). Measured against
+	// jev-1.13.0, its 32k-token state limit is reached at about 64 KB of
+	// emoji-dense text (about 2 bytes per token) and 72 KB of JSON (about 2.2),
+	// so 48 KB leaves room for the densest text. English is about 5.6 bytes per
+	// token.
+	maxScreenedTextBytes = 48 << 10
+
 	// Jev's documented limits on criteria size per question type.
 	maxScoreLevels  = 10
 	maxChoiceOption = 255
@@ -508,7 +516,59 @@ func extractText(payload []byte, params typesafeJevContentSafetyPhaseParams, isR
 	if err != nil {
 		return "", err
 	}
+	if strings.Contains(params.JSONPath, "*") {
+		return textFromMatches(value)
+	}
 	return textFromValue(value)
+}
+
+// normalizeWildcards rewrites "[*]" as ".*", the form the SDK's JSONPath
+// helper understands, so "$.messages[*].content" and "$.messages.*.content"
+// select the same messages.
+func normalizeWildcards(path string) string {
+	return strings.ReplaceAll(path, "[*]", ".*")
+}
+
+// textFromMatches joins the text of every value a wildcard path selected, one
+// per message, in order. Each value is read like a single message's content,
+// so a null value (a tool-call-only assistant message) contributes nothing and
+// a content-part array contributes its text parts. The newest messages are kept
+// whole and the oldest dropped once the text passes maxScreenedTextBytes, so a
+// long conversation stays within Jev's input limit; the newest message is
+// always kept, even when it alone passes the limit.
+func textFromMatches(value interface{}) (string, error) {
+	matches, ok := value.([]interface{})
+	if !ok {
+		return textFromValue(value)
+	}
+	texts := make([]string, 0, len(matches))
+	for i, match := range matches {
+		text, err := textFromValue(match)
+		if err != nil {
+			return "", fmt.Errorf("match %d: %w", i, err)
+		}
+		if strings.TrimSpace(text) != "" {
+			texts = append(texts, text)
+		}
+	}
+
+	const separator = "\n\n"
+	start, size := len(texts), 0
+	for i := len(texts) - 1; i >= 0; i-- {
+		next := len(texts[i])
+		if i < len(texts)-1 {
+			next += len(separator)
+		}
+		if start < len(texts) && size+next > maxScreenedTextBytes {
+			break
+		}
+		start, size = i, size+next
+	}
+	if start > 0 {
+		slog.Debug("TypesafeJevContentSafety: Screened text over the size limit, dropping the oldest messages",
+			"dropped", start, "kept", len(texts)-start, "limitBytes", maxScreenedTextBytes)
+	}
+	return strings.Join(texts[start:], separator), nil
 }
 
 // textFromValue converts a JSONPath result to screenable text. A null value
@@ -805,7 +865,7 @@ func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (ty
 		if !ok {
 			return result, fmt.Errorf("'jsonPath' must be a string")
 		}
-		result.JSONPath = jsonPath
+		result.JSONPath = normalizeWildcards(jsonPath)
 	}
 
 	if streamingJSONPathRaw, ok := params["streamingJsonPath"]; ok {
@@ -813,7 +873,7 @@ func parsePhaseParams(params map[string]interface{}, defaultJSONPath string) (ty
 		if !ok || streamingJSONPath == "" {
 			return result, fmt.Errorf("'streamingJsonPath' must be a non-empty string")
 		}
-		result.StreamingJSONPath = streamingJSONPath
+		result.StreamingJSONPath = normalizeWildcards(streamingJSONPath)
 	}
 
 	if modeRaw, ok := params["mode"]; ok {
