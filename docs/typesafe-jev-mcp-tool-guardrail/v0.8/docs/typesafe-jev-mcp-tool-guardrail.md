@@ -23,16 +23,15 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 ## Features
 
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
-- Tool rules choose which tools are screened and against which scope: name one tool, or use `*` for every tool without its own rule
+- Tool rules set everything per tool: which tools are screened, the scope, the questions, the mode and fail-open; name one tool, or use `*` for every tool without its own rule
 - Default questions covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive, security-weakening and out-of-scope calls; the destructive, irreversible, privilege and disruption questions don't flag effects the scope calls for
-- The default questions are pre-filled in the policy configuration, so they can be seen and edited
-- A tool rule can also replace the questions for its tools
+- The default questions are pre-filled in each new rule, so they can be seen and edited
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
 - Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was sent with `Content-Type: text/event-stream`
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
-- `enforce` mode (blocks) or `monitor` mode (records hits without blocking, for tuning thresholds on real traffic)
+- `enforce` mode (blocks) or `monitor` mode (records hits without blocking, for tuning thresholds on real traffic), per rule
 - Configurable Jev timeout (default `5s`) with one automatic retry when Jev is rate limited or overloaded
-- Fail-closed by default on Jev API errors and timeouts; configurable to fail-open
+- Fail-closed by default on Jev API errors and timeouts; configurable to fail-open per rule
 - Records Jev token usage and flagged questions in request metadata
 
 ## Configuration
@@ -63,12 +62,11 @@ jev_model = "jev-latest"
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `tools` | array of objects | Yes | — | Which tools to screen, and the scope to judge their calls against; see [Tool rules](#tool-rules). At least one rule. |
-| `questions` | array of objects | No | The [default questions](#default-questions), pre-filled | The typed questions to ask Jev about each screened tool call, for every rule that doesn't set its own. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
-| `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
-| `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
-| `passthroughOnError` | boolean | No | `false` | When `true`, lets the call through if the Jev API call fails or times out (fail-open). When `false`, the call is rejected with a JSON-RPC internal error (fail-closed). |
+| `tools` | array of objects | Yes | — | Which tools to screen, and how; see [Tool rules](#tool-rules). At least one rule. |
+| `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per the matching rule's `passthroughOnError`. |
 | `showAssessment` | boolean | No | `false` | When `true`, the JSON-RPC error for a blocked call includes, in `error.data`, which questions were flagged, their values, and thresholds. |
+
+`scope`, `questions`, `mode` and `passthroughOnError` are set in each rule. At the top level they are rejected, so a setting can't be silently ignored.
 
 #### Question object shape
 
@@ -84,7 +82,7 @@ jev_model = "jev-latest"
 
 #### Default questions
 
-The `questions` parameter is pre-filled with these `noul` questions, each blocking at `0.7`, so they can be seen and edited in the policy configuration. If `questions` is omitted or empty, the same questions are used.
+Each rule's `questions` is pre-filled with these `noul` questions, each blocking at `0.7`, so they can be seen and edited in the policy configuration. If a rule's `questions` is omitted or empty, the same questions are used.
 
 | Key | Instructions |
 |-----|--------------|
@@ -101,19 +99,21 @@ The questions that mention `scope` keep the guardrail from blocking the work the
 
 #### Tool rules
 
-The `tools` parameter chooses which tools are screened and the scope each call is judged against. Each rule names one tool, exactly as it appears in `tools/call` (`params.name`), or `*` for every tool without its own rule. MCP proxies take policies for the whole proxy, so this list is how the policy is set up per tool, as in `mcp-authz`.
+The `tools` parameter chooses which tools are screened and how. Each rule names one tool, exactly as it appears in `tools/call` (`params.name`), or `*` for every tool without its own rule. MCP proxies take policies for the whole proxy, so this list is how the policy is set up per tool, as in `mcp-authz`.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | The tool name, or `*`. Each name, `*` included, can have one rule. |
-| `scope` | string | Yes | What the agent is meant to do, in plain words; see [Writing a scope](#writing-a-scope). |
-| `questions` | array of objects | No | The questions to ask for this rule's tools, instead of the proxy-wide `questions`. Same shape as [`questions`](#question-object-shape). |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | `*`, pre-filled | The tool name, or `*`. Each name, `*` included, can have one rule. |
+| `scope` | string | Yes | — | What the agent is meant to do, in plain words; see [Writing a scope](#writing-a-scope). |
+| `questions` | array of objects | No | The [default questions](#default-questions), pre-filled | The typed questions to ask Jev about this rule's tool calls; see [Question object shape](#question-object-shape). The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
+| `mode` | `enforce` \| `monitor` | No | `enforce`, pre-filled | `enforce` blocks when a question crosses its threshold. `monitor` never blocks; see [Monitor mode](#monitor-mode). |
+| `passthroughOnError` | boolean | No | `false` | When `true`, lets this rule's calls through if the Jev API call fails or times out (fail-open). When `false`, the call is rejected with a JSON-RPC internal error (fail-closed). |
 
 How a call is matched:
 
-- A rule for the exact tool name wins over `*`. Only one rule applies to a call, so each screened call is one Jev request.
+- A rule for the exact tool name wins over `*`. Only one rule applies to a call, so each screened call is one Jev request, with that rule's scope, questions, mode and `passthroughOnError`.
 - A tool that no rule matches isn't screened and passes through without calling Jev. Without a `*` rule, only the listed tools are checked, and tools added to the MCP server later aren't checked until they get a rule.
-- A rule's `questions` replace the proxy-wide questions for that rule's tools; they aren't added to them. To keep the default questions for a tool and add one of your own, list the defaults in the rule too.
+- A rule doesn't inherit anything from the `*` rule. For example, a custom question added to `*` doesn't apply to a tool with its own rule; add it there too.
 
 To screen every tool, use one `*` rule:
 
@@ -124,7 +124,7 @@ params:
       scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
 ```
 
-To screen every tool, but judge one of them against a different scope, add a rule for it:
+To screen every tool, but judge one of them against a different scope, or monitor it instead of blocking, add a rule for it:
 
 ```yaml
 params:
@@ -133,6 +133,7 @@ params:
       scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
     - name: orderPizza
       scope: "A pizza ordering assistant that places pizza orders for the customer."
+      mode: monitor
 ```
 
 To screen only some tools, leave out the `*` rule:
@@ -197,7 +198,7 @@ Every error response echoes the `Mcp-Session-Id` header, and the request `id` wh
 
 #### Monitor mode
 
-With `mode: monitor`, the policy never blocks. A call that would have been blocked is let through, the hit is recorded in analytics (`isGuardrailHit`, `guardrailName`), and the flagged questions are written to request metadata under `typesafe-jev-mcp-tool-guardrail:assessments`. Use it to tune thresholds and wording on real traffic before enforcing.
+With `mode: monitor` on a rule, the policy never blocks that rule's calls. A call that would have been blocked is let through, the hit is recorded in analytics (`isGuardrailHit`, `guardrailName`), and the flagged questions are written to request metadata under `typesafe-jev-mcp-tool-guardrail:assessments`. Use it to tune thresholds and wording on real traffic before enforcing.
 
 #### Request metadata
 
@@ -210,7 +211,7 @@ In both modes the policy writes Jev's token usage to `typesafe-jev-mcp-tool-guar
 - **Jev judges what the arguments say.** Tool descriptions aren't part of a `tools/call` request, so Jev sees only the name and arguments. For example, an `echo` tool asked to repeat the text "rm -rf /" can be flagged as destructive.
 - **Arguments are untrusted input.** Adversarial text inside arguments can influence Jev's answers ([jev-1.13 known weaknesses](https://docs.typesafe.ai/model-jaggedness/jev-1.13)). Keep `mcp-acl-list` and `mcp-authz` in place for rules that must always hold.
 - **Latency.** Each tool call waits for one Jev request, bounded by `timeout`.
-- **Size.** Jev accepts up to 32k tokens of state within 64k tokens per request ([models](https://docs.typesafe.ai/models)). A larger call fails the check and is handled per `passthroughOnError`.
+- **Size.** Jev accepts up to 32k tokens of state within 64k tokens per request ([models](https://docs.typesafe.ai/models)). A larger call fails the check and is handled per the matching rule's `passthroughOnError`.
 
 #### Policy order
 
@@ -282,25 +283,25 @@ policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
+      showAssessment: true
       tools:
         - name: "*"
           scope: "A support assistant that looks up orders and replies to customers by email."
-      showAssessment: true
-      questions:
-        - key: risk
-          type: score
-          instructions: "What is the worst effect running the tool call in `tool` could have?"
-          criteria:
-            - "Reads data only."
-            - "Changes data in a way that is easy to undo."
-            - "Deletes or overwrites data."
-            - "Has an effect outside the system that cannot be undone."
-          threshold: 2
-          confidenceThreshold: 0.6
-        - key: external_destination
-          type: noul
-          instructions: "Does `tool.arguments` send data to a URL or email address outside example.com?"
-          threshold: 0.7
+          questions:
+            - key: risk
+              type: score
+              instructions: "What is the worst effect running the tool call in `tool` could have?"
+              criteria:
+                - "Reads data only."
+                - "Changes data in a way that is easy to undo."
+                - "Deletes or overwrites data."
+                - "Has an effect outside the system that cannot be undone."
+              threshold: 2
+              confidenceThreshold: 0.6
+            - key: external_destination
+              type: noul
+              instructions: "Does `tool.arguments` send data to a URL or email address outside example.com?"
+              threshold: 0.7
 ```
 
 ### Example 3: Monitor Before Enforcing, Fail-Open on Outage
@@ -312,12 +313,12 @@ policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
+      timeout: "2s"
       tools:
         - name: "*"
           scope: "A support assistant that looks up orders and replies to customers by email."
-      mode: monitor
-      passthroughOnError: true
-      timeout: "2s"
+          mode: monitor
+          passthroughOnError: true
 ```
 
-Flagged calls are recorded in analytics and request metadata without being blocked. Once the thresholds look right on real traffic, remove `mode` to enforce.
+Flagged calls are recorded in analytics and request metadata without being blocked. Once the thresholds look right on real traffic, set the rule's `mode` to `enforce`.

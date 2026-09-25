@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -96,11 +97,11 @@ var benignAnswers = withDefaultAnswers(map[string]float64{"destructive": 0.02, "
 
 func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *TypesafeJevMcpToolGuardrailPolicy {
 	t.Helper()
-	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL, "tools": everyTool("A test assistant.")}
+	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL}
 	for k, v := range extra {
 		params[k] = v
 	}
-	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	p, err := GetPolicy(policy.PolicyMetadata{}, withWildcardRule(params))
 	if err != nil {
 		t.Fatalf("GetPolicy: %v", err)
 	}
@@ -110,6 +111,24 @@ func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *Type
 // everyTool is a tools list with one "*" rule, which screens every tool.
 func everyTool(scope string) []interface{} {
 	return []interface{}{map[string]interface{}{"name": "*", "scope": scope}}
+}
+
+// withWildcardRule lets a test set rule settings (scope, questions, mode,
+// passthroughOnError) as if they were top-level: unless the test sets its own
+// tools, they're moved into one "*" rule, which gets a test scope by default.
+func withWildcardRule(params map[string]interface{}) map[string]interface{} {
+	if _, ok := params["tools"]; ok {
+		return params
+	}
+	rule := map[string]interface{}{"name": "*", "scope": "A test assistant."}
+	for _, key := range ruleParams {
+		if v, ok := params[key]; ok {
+			rule[key] = v
+			delete(params, key)
+		}
+	}
+	params["tools"] = []interface{}{rule}
+	return params
 }
 
 func mcpRequest(body string, headers map[string][]string) *policy.RequestContext {
@@ -197,7 +216,10 @@ func TestGetPolicy_Params(t *testing.T) {
 		{name: "missing tools", params: map[string]interface{}{"apiKey": "k", "tools": nil}, wantErr: "'tools' is required"},
 		{name: "empty tools", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{}}, wantErr: "'tools' is required"},
 		{name: "tools not an array", params: map[string]interface{}{"apiKey": "k", "tools": "orderPizza"}, wantErr: "'tools' must be an array"},
-		{name: "top-level scope", params: map[string]interface{}{"apiKey": "k", "scope": "A calculator assistant."}, wantErr: "not at the top level"},
+		{name: "top-level scope", params: map[string]interface{}{"apiKey": "k", "tools": everyTool("x"), "scope": "A calculator assistant."}, wantErr: "'scope' is set per rule"},
+		{name: "top-level questions", params: map[string]interface{}{"apiKey": "k", "tools": everyTool("x"), "questions": []interface{}{}}, wantErr: "'questions' is set per rule"},
+		{name: "top-level mode", params: map[string]interface{}{"apiKey": "k", "tools": everyTool("x"), "mode": "monitor"}, wantErr: "'mode' is set per rule"},
+		{name: "top-level passthroughOnError", params: map[string]interface{}{"apiKey": "k", "tools": everyTool("x"), "passthroughOnError": true}, wantErr: "'passthroughOnError' is set per rule"},
 		{name: "rule not an object", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{"*"}}, wantErr: "'tools[0]' must be an object"},
 		{name: "rule without name", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
 			map[string]interface{}{"scope": "x"}}}, wantErr: "'tools[0].name' is required"},
@@ -219,11 +241,11 @@ func TestGetPolicy_Params(t *testing.T) {
 		{name: "exact and * rules", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
 			map[string]interface{}{"name": "*", "scope": "A calculator assistant."},
 			map[string]interface{}{"name": "add", "scope": "A calculator assistant.", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 0.5}}}}}},
-		{name: "bad mode", params: map[string]interface{}{"apiKey": "k", "mode": "block"}, wantErr: "'mode' must be"},
+		{name: "bad mode", params: map[string]interface{}{"apiKey": "k", "mode": "block"}, wantErr: "'tools[0]': 'mode' must be"},
 		{name: "bad timeout", params: map[string]interface{}{"apiKey": "k", "timeout": "soon"}, wantErr: "not a valid duration"},
 		{name: "timeout too long", params: map[string]interface{}{"apiKey": "k", "timeout": "31s"}, wantErr: "at most 30s"},
 		{name: "timeout not a string", params: map[string]interface{}{"apiKey": "k", "timeout": 5}, wantErr: "duration string"},
-		{name: "passthroughOnError not bool", params: map[string]interface{}{"apiKey": "k", "passthroughOnError": "yes"}, wantErr: "'passthroughOnError' must be a boolean"},
+		{name: "passthroughOnError not bool", params: map[string]interface{}{"apiKey": "k", "passthroughOnError": "yes"}, wantErr: "'tools[0]': 'passthroughOnError' must be a boolean"},
 		{name: "showAssessment not bool", params: map[string]interface{}{"apiKey": "k", "showAssessment": 1}, wantErr: "'showAssessment' must be a boolean"},
 		{name: "questions not array", params: map[string]interface{}{"apiKey": "k", "questions": "x"}, wantErr: "'questions' must be an array"},
 		{
@@ -289,11 +311,13 @@ func TestGetPolicy_Params(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Every case gets a valid "*" rule unless it sets its own tools.
-			if _, ok := tt.params["tools"]; !ok && tt.params["apiKey"] != nil {
-				tt.params["tools"] = everyTool("A test assistant.")
+			// Every case gets a valid "*" rule, holding its rule settings, unless it
+			// sets its own tools.
+			params := tt.params
+			if params["apiKey"] != nil {
+				params = withWildcardRule(params)
 			}
-			_, err := GetPolicy(policy.PolicyMetadata{}, tt.params)
+			_, err := GetPolicy(policy.PolicyMetadata{}, params)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -330,8 +354,9 @@ func TestDefaultQuestions(t *testing.T) {
 	if p.anyTool == nil || p.anyTool.scope != "A calculator assistant." {
 		t.Fatalf("\"*\" rule = %+v, want its scope trimmed", p.anyTool)
 	}
-	if len(p.questions) != len(defaultBattery) {
-		t.Fatalf("omitted questions gave %d questions, want the %d defaults", len(p.questions), len(defaultBattery))
+	if len(p.anyTool.questions) != len(defaultBattery) || p.anyTool.mode != modeEnforce || p.anyTool.passthroughOnError {
+		t.Fatalf("omitted settings gave %d questions, mode %q, passthroughOnError %v; want the %d defaults, enforce, false",
+			len(p.anyTool.questions), p.anyTool.mode, p.anyTool.passthroughOnError, len(defaultBattery))
 	}
 }
 
@@ -343,7 +368,7 @@ func TestDefaultQuestions_MatchPolicyDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 	def := string(definition)
-	if got := strings.Count(def, "\n          instructions: \""); got != len(defaultBattery) {
+	if got := len(regexp.MustCompile(`(?m)^ +instructions: "`).FindAllString(def, -1)); got != len(defaultBattery) {
 		t.Fatalf("policy definition lists %d default questions, want %d", got, len(defaultBattery))
 	}
 	for _, q := range defaultQuestions() {
@@ -869,8 +894,8 @@ func callTool(p *TypesafeJevMcpToolGuardrailPolicy, tool string) policy.RequestA
 	return p.OnRequestBody(context.Background(), mcpRequest(body, nil), nil)
 }
 
-// A rule for the exact tool name wins over "*", and a rule's questions replace the
-// proxy-wide ones for that rule's tools only.
+// A rule for the exact tool name wins over "*", and each rule's questions apply to
+// its own tools only.
 func TestOnRequestBody_ExactRuleWinsOverWildcard(t *testing.T) {
 	jev := newMockJev(t, func(w http.ResponseWriter, _ int32) {
 		// Every question any rule can ask, all low.
@@ -898,13 +923,13 @@ func TestOnRequestBody_ExactRuleWinsOverWildcard(t *testing.T) {
 	}
 
 	if got := sent("orderPizza"); got.State.Scope != "A pizza ordering assistant." || len(got.Questions) != len(defaultBattery) {
-		t.Fatalf("orderPizza: scope %q, %d questions; want its rule's scope and the proxy-wide questions", got.State.Scope, len(got.Questions))
+		t.Fatalf("orderPizza: scope %q, %d questions; want its rule's scope and the default questions", got.State.Scope, len(got.Questions))
 	}
 	if got := sent("viewPizzaMenu"); got.State.Scope != "A pizza menu assistant." || len(got.Questions) != 1 || got.Questions["pizza_limit"] == nil {
 		t.Fatalf("viewPizzaMenu: scope %q, questions %v; want its rule's scope and only its rule's question", got.State.Scope, got.Questions)
 	}
 	if got := sent("add"); got.State.Scope != "A calculator assistant." || len(got.Questions) != len(defaultBattery) {
-		t.Fatalf("add: scope %q, %d questions; want the \"*\" rule's scope and the proxy-wide questions", got.State.Scope, len(got.Questions))
+		t.Fatalf("add: scope %q, %d questions; want the \"*\" rule's scope and the default questions", got.State.Scope, len(got.Questions))
 	}
 }
 
@@ -934,4 +959,34 @@ func TestOnRequestBody_OnlyListedToolsAreScreenedWithoutWildcard(t *testing.T) {
 	if n := jev.calls.Load(); n != 1 {
 		t.Fatalf("Jev called %d times, want 1", n)
 	}
+}
+
+// Mode and passthroughOnError come from the rule that matches the call.
+func TestOnRequestBody_ModeAndPassthroughArePerRule(t *testing.T) {
+	jev := newMockJev(t, answering(map[string]float64{"destructive": 0.95}))
+	p := newPolicy(t, jev.server.URL, map[string]interface{}{
+		"tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "A support assistant.", "mode": "monitor"},
+			map[string]interface{}{"name": "run_sql", "scope": "A support assistant."},
+		},
+	})
+	if resp := mustImmediate(t, p.OnRequestBody(context.Background(), mcpRequest(toolCallDrop, nil), nil)); resp.StatusCode != statusBlocked {
+		t.Fatalf("run_sql (enforce rule): status %d, want %d", resp.StatusCode, statusBlocked)
+	}
+	ctx := mcpRequest(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_file","arguments":{"path":"/"}}}`, nil)
+	if mods := mustPassthrough(t, p.OnRequestBody(context.Background(), ctx, nil)); mods.AnalyticsMetadata["isGuardrailHit"] != true {
+		t.Fatalf("delete_file (monitor rule): analytics = %v, want a recorded hit", mods.AnalyticsMetadata)
+	}
+
+	down := newMockJev(t, func(w http.ResponseWriter, _ int32) { w.WriteHeader(http.StatusInternalServerError) })
+	p = newPolicy(t, down.server.URL, map[string]interface{}{
+		"tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "A support assistant."},
+			map[string]interface{}{"name": "get_order", "scope": "A support assistant.", "passthroughOnError": true},
+		},
+	})
+	if resp := mustImmediate(t, p.OnRequestBody(context.Background(), mcpRequest(toolCallDrop, nil), nil)); resp.StatusCode != statusCheckUnavailable {
+		t.Fatalf("run_sql (fail closed): status %d, want %d", resp.StatusCode, statusCheckUnavailable)
+	}
+	mustPassthrough(t, callTool(p, "get_order"))
 }

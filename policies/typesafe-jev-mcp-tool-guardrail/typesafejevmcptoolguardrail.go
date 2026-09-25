@@ -24,12 +24,13 @@
 //
 // The default battery asks whether the call is destructive, irreversible, sends
 // private data out, reads secrets, raises privileges, disrupts a running system,
-// weakens a security control, or falls outside the scope. Which tools are screened,
-// and against which scope, is set by rules: a rule names one tool, or "*" for
-// every tool without its own rule, and gives the scope that describes the agent's
-// job, so effects it calls for aren't flagged and a call outside it is. A tool no
-// rule matches isn't screened. The MCP proxy never sees the agent's conversation,
-// so scope is judged against the configured text only.
+// weakens a security control, or falls outside the scope. Everything about how a
+// tool is screened is set by rules: a rule names one tool, or "*" for every tool
+// without its own rule, and gives the scope that describes the agent's job (so
+// effects it calls for aren't flagged and a call outside it is), the questions,
+// the mode, and whether to fail open. A tool no rule matches isn't screened. The
+// MCP proxy never sees the agent's conversation, so scope is judged against the
+// configured text only.
 package typesafejevmcptoolguardrail
 
 import (
@@ -152,11 +153,12 @@ func defaultQuestions() []guardrailQuestion {
 // wildcardToolName is the rule name that matches every tool without its own rule.
 const wildcardToolName = "*"
 
-// toolRule is the scope, and optionally the questions, to screen a tool's calls
-// with. Nil questions means the proxy-wide questions are used.
+// toolRule is how the calls of the tools it matches are screened.
 type toolRule struct {
-	scope     string
-	questions []guardrailQuestion
+	scope              string
+	questions          []guardrailQuestion
+	mode               string
+	passthroughOnError bool
 }
 
 // TypesafeJevMcpToolGuardrailPolicy implements a Jev-backed guardrail for MCP tool calls.
@@ -166,13 +168,10 @@ type TypesafeJevMcpToolGuardrailPolicy struct {
 	model   string
 	client  *http.Client
 
-	questions          []guardrailQuestion
-	tools              map[string]toolRule
-	anyTool            *toolRule
-	mode               string
-	timeout            time.Duration
-	passthroughOnError bool
-	showAssessment     bool
+	tools          map[string]toolRule
+	anyTool        *toolRule
+	timeout        time.Duration
+	showAssessment bool
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -192,7 +191,6 @@ func GetPolicy(
 		baseURL: stringParamOrDefault(params, "baseURL", defaultBaseURL),
 		model:   stringParamOrDefault(params, "model", defaultModel),
 		client:  &http.Client{},
-		mode:    modeEnforce,
 		timeout: defaultTimeout,
 	}
 	if err := p.parseParams(params); err != nil {
@@ -200,7 +198,7 @@ func GetPolicy(
 	}
 
 	slog.Debug("TypesafeJevMcpToolGuardrail: Policy initialized",
-		"questions", len(p.questions), "toolRules", len(p.tools), "wildcardRule", p.anyTool != nil, "mode", p.mode)
+		"toolRules", len(p.tools), "wildcardRule", p.anyTool != nil)
 
 	return p, nil
 }
@@ -346,20 +344,6 @@ func parseToolCall(body []byte, headers *policy.Headers) (*toolCallRequest, *pol
 // screen asks Jev the configured questions about one tool call and returns either
 // a passthrough or a blocking JSON-RPC error.
 func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *policy.SharedContext, headers *policy.Headers, call *toolCallRequest) policy.RequestAction {
-	// failure handles an error in the check itself (not a violation). Monitor mode
-	// never blocks, so it always passes through regardless of passthroughOnError.
-	failure := func(reason string, err error) policy.RequestAction {
-		if p.mode == modeMonitor || p.passthroughOnError {
-			slog.Debug("TypesafeJevMcpToolGuardrail: check failed, passing through",
-				"reason", reason, "error", err, "mode", p.mode, "tool", call.Name)
-			return policy.UpstreamRequestModifications{}
-		}
-		slog.Debug("TypesafeJevMcpToolGuardrail: check failed, failing closed",
-			"reason", reason, "error", err, "tool", call.Name)
-		return buildRequestErrorResponse(headers, statusCheckUnavailable, jsonRpcErrCodeInternal,
-			"MCP tool call could not be checked by guardrail", call.ID, nil)
-	}
-
 	// A rule for the exact tool name wins over "*". A tool no rule matches isn't
 	// screened, so it costs no Jev call.
 	rule, ok := p.tools[call.Name]
@@ -370,10 +354,22 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *
 		}
 		rule = *p.anyTool
 	}
-	questions := p.questions
-	if rule.questions != nil {
-		questions = rule.questions
+	questions := rule.questions
+
+	// failure handles an error in the check itself (not a violation). Monitor mode
+	// never blocks, so it always passes through regardless of passthroughOnError.
+	failure := func(reason string, err error) policy.RequestAction {
+		if rule.mode == modeMonitor || rule.passthroughOnError {
+			slog.Debug("TypesafeJevMcpToolGuardrail: check failed, passing through",
+				"reason", reason, "error", err, "mode", rule.mode, "tool", call.Name)
+			return policy.UpstreamRequestModifications{}
+		}
+		slog.Debug("TypesafeJevMcpToolGuardrail: check failed, failing closed",
+			"reason", reason, "error", err, "tool", call.Name)
+		return buildRequestErrorResponse(headers, statusCheckUnavailable, jsonRpcErrCodeInternal,
+			"MCP tool call could not be checked by guardrail", call.ID, nil)
 	}
+
 	state := toolCallState{
 		Tool:  toolCallStateTool{Name: call.Name, Arguments: call.Arguments},
 		Scope: rule.scope,
@@ -420,7 +416,7 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *
 
 	setMetadata(shared, metaKeyAssessments, failed)
 
-	if p.mode == modeMonitor {
+	if rule.mode == modeMonitor {
 		slog.Info("TypesafeJevMcpToolGuardrail: violation detected (monitor mode, not blocking)",
 			"failedQuestions", failed, "tool", call.Name)
 		return policy.UpstreamRequestModifications{AnalyticsMetadata: guardrailHitAnalytics()}
@@ -923,18 +919,14 @@ func stringParamOrDefault(params map[string]interface{}, key, def string) string
 	return def
 }
 
-func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interface{}) error {
-	if _, ok := params["scope"]; ok {
-		// Left in, a top-level scope would be silently ignored.
-		return fmt.Errorf("'scope' is set per rule in 'tools', not at the top level; for example, a rule with name \"*\" and a scope screens every tool")
-	}
+// ruleParams are set per rule in "tools"; at the top level they would be ignored.
+var ruleParams = []string{"scope", "questions", "mode", "passthroughOnError"}
 
-	if modeRaw, ok := params["mode"]; ok {
-		mode, ok := modeRaw.(string)
-		if !ok || (mode != modeEnforce && mode != modeMonitor) {
-			return fmt.Errorf("'mode' must be '%s' or '%s'", modeEnforce, modeMonitor)
+func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interface{}) error {
+	for _, key := range ruleParams {
+		if _, ok := params[key]; ok {
+			return fmt.Errorf("'%s' is set per rule in 'tools', not at the top level; for example, a rule with name \"*\" applies to every tool", key)
 		}
-		p.mode = mode
 	}
 
 	if timeoutRaw, ok := params["timeout"]; ok {
@@ -952,14 +944,6 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interf
 		p.timeout = timeout
 	}
 
-	if passthroughRaw, ok := params["passthroughOnError"]; ok {
-		passthrough, ok := passthroughRaw.(bool)
-		if !ok {
-			return fmt.Errorf("'passthroughOnError' must be a boolean")
-		}
-		p.passthroughOnError = passthrough
-	}
-
 	if showAssessmentRaw, ok := params["showAssessment"]; ok {
 		showAssessment, ok := showAssessmentRaw.(bool)
 		if !ok {
@@ -967,15 +951,6 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interf
 		}
 		p.showAssessment = showAssessment
 	}
-
-	questions, err := parseQuestionList(params["questions"])
-	if err != nil {
-		return err
-	}
-	if questions == nil {
-		questions = defaultQuestions()
-	}
-	p.questions = questions
 
 	tools, anyTool, err := parseToolRules(params["tools"])
 	if err != nil {
@@ -1018,10 +993,9 @@ func parseQuestionList(raw interface{}) ([]guardrailQuestion, error) {
 	return questions, nil
 }
 
-// parseToolRules reads the rules that choose which tools are screened. Each rule
-// names one tool exactly, as it appears in tools/call params.name, or "*" for
-// every tool without its own rule, and gives the scope to judge its calls against.
-// The "*" rule is returned separately.
+// parseToolRules reads the rules that choose which tools are screened and how.
+// Each rule names one tool exactly, as it appears in tools/call params.name, or
+// "*" for every tool without its own rule. The "*" rule is returned separately.
 func parseToolRules(raw interface{}) (map[string]toolRule, *toolRule, error) {
 	list, ok := raw.([]interface{})
 	if raw != nil && !ok {
@@ -1052,11 +1026,9 @@ func parseToolRules(raw interface{}) (map[string]toolRule, *toolRule, error) {
 			// The default questions judge each call against the scope, so it can't be left out.
 			return nil, nil, fmt.Errorf("'tools[%d].scope' is required: describe, in plain words, what the agent is meant to do with this tool, or with this MCP server for \"*\"", i)
 		}
-		questions, err := parseQuestionList(ruleMap["questions"])
-		if err != nil {
+		if err := rule.parseSettings(ruleMap); err != nil {
 			return nil, nil, fmt.Errorf("'tools[%d]': %w", i, err)
 		}
-		rule.questions = questions
 		if name == wildcardToolName {
 			anyTool = &rule
 			continue
@@ -1064,6 +1036,37 @@ func parseToolRules(raw interface{}) (map[string]toolRule, *toolRule, error) {
 		rules[name] = rule
 	}
 	return rules, anyTool, nil
+}
+
+// parseSettings reads a rule's questions, mode and passthroughOnError. Omitted or
+// empty questions mean the default questions.
+func (r *toolRule) parseSettings(ruleMap map[string]interface{}) error {
+	r.mode = modeEnforce
+	if modeRaw, ok := ruleMap["mode"]; ok {
+		mode, ok := modeRaw.(string)
+		if !ok || (mode != modeEnforce && mode != modeMonitor) {
+			return fmt.Errorf("'mode' must be '%s' or '%s'", modeEnforce, modeMonitor)
+		}
+		r.mode = mode
+	}
+
+	if passthroughRaw, ok := ruleMap["passthroughOnError"]; ok {
+		passthrough, ok := passthroughRaw.(bool)
+		if !ok {
+			return fmt.Errorf("'passthroughOnError' must be a boolean")
+		}
+		r.passthroughOnError = passthrough
+	}
+
+	questions, err := parseQuestionList(ruleMap["questions"])
+	if err != nil {
+		return err
+	}
+	if questions == nil {
+		questions = defaultQuestions()
+	}
+	r.questions = questions
+	return nil
 }
 
 func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, error) {
