@@ -16,10 +16,12 @@ parameters:
       description: |
         What the agent using this MCP server is meant to do, in plain words
         (for example "A customer support assistant that looks up orders").
-        When set, the default questions ignore effects the scope calls for
-        and also ask whether a tool call falls outside it. The MCP proxy
-        doesn't see the agent's conversation, so this text is the only scope
-        Jev can judge against.
+        When set, the default "destructive", "irreversible", "privilege" and
+        "disruption" questions ignore effects the scope calls for, and the
+        default questions also ask whether a tool call falls outside it.
+        "exfiltration", "sensitive_data" and "security_control" still apply
+        to in-scope calls. The MCP proxy doesn't see the agent's
+        conversation, so this text is the only scope Jev can judge against.
     questions:
       type: array
       x-wso2-policy-advanced-param: false

@@ -23,7 +23,7 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 ## Features
 
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
-- Default question battery covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive and security-weakening calls; with `scope` set, effects the scope calls for aren't flagged and calls outside it are
+- Default question battery covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive and security-weakening calls; with `scope` set, the destructive, irreversible, privilege and disruption questions don't flag effects the scope calls for, and calls outside the scope are flagged
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
 - Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was sent with `Content-Type: text/event-stream`
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
@@ -60,7 +60,7 @@ jev_model = "jev-latest"
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope`: the default questions that judge an effect then ignore effects the scope calls for, and the `out_of_scope` question is added. |
+| `scope` | string | No | — | What the agent using this MCP server is meant to do, in plain words. When set, it is sent to Jev as `scope`: the default `destructive`, `irreversible`, `privilege` and `disruption` questions then ignore effects the scope calls for, and the `out_of_scope` question is added. `exfiltration`, `sensitive_data` and `security_control` still flag such calls even when the scope covers them. |
 | `questions` | array of objects | No | See [default battery](#default-question-battery) | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
 | `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
