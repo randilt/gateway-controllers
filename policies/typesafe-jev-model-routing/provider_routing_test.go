@@ -321,3 +321,58 @@ func TestOnRequestBody_ContentPathDefaultAndOverride(t *testing.T) {
 		})
 	}
 }
+
+// A message sent as OpenAI-style content parts is routed on its text parts
+// rather than falling back to the default target.
+func TestOnRequestBody_ContentPartsAreRoutedOnTheirText(t *testing.T) {
+	received := make(chan string, 1)
+	server := jevChoiceServer(t, "Coding", 0.9, func(request *jevSystemOneRequest) {
+		received <- request.State
+	})
+	params := providerTestParams()
+	params["baseURL"] = server.URL
+	impl, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &policy.RequestContext{
+		SharedContext: &policy.SharedContext{},
+		Body: &policy.Body{Content: []byte(`{"model":"old","messages":[{"role":"user","content":[
+			{"type":"text","text":"refactor this function"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},
+			{"type":"text","text":"and add tests"}]}]}`)},
+	}
+	action := impl.(*TypesafeJevModelRoutingPolicy).OnRequestBody(t.Context(), req, nil)
+	assertProviderAction(t, action, req, "shared-model", "provider-a")
+	if got := <-received; got != "refactor this function\nand add tests" {
+		t.Fatalf("Jev state = %q, want the joined text parts", got)
+	}
+}
+
+func TestExtractRequestText(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+		wantErr          bool
+	}{
+		{name: "string", body: `{"m":[{"content":"hi"}]}`, want: "hi"},
+		{name: "number", body: `{"m":[{"content":42}]}`, want: "42"},
+		{name: "content parts", body: `{"m":[{"content":[{"type":"text","text":"a"},"b",{"type":"input_audio"}]}]}`, want: "a\nb"},
+		{name: "null content", body: `{"m":[{"content":null}]}`, wantErr: true},
+		{name: "untyped object in array", body: `{"m":[{"content":[{"role":"user"}]}]}`, wantErr: true},
+		{name: "object", body: `{"m":[{"content":{"a":1}}]}`, wantErr: true},
+		{name: "invalid JSON", body: `{`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractRequestText([]byte(tc.body), "$.m[-1].content")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("extractRequestText = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}

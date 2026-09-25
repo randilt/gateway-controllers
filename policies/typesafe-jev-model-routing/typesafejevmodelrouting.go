@@ -30,6 +30,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,7 +148,7 @@ func (p *TypesafeJevModelRoutingPolicy) OnRequestBody(
 		return policy.UpstreamRequestModifications{}
 	}
 
-	userText, err := utils.ExtractStringValueFromJsonpath(content, p.contentPath)
+	userText, err := extractRequestText(content, p.contentPath)
 	if err != nil {
 		slog.Debug("TypesafeJevModelRouting: JSONPath extraction failed, using default model",
 			"contentPath", p.contentPath, "error", err)
@@ -195,6 +196,54 @@ func (p *TypesafeJevModelRoutingPolicy) selectTarget(answer choiceAnswer) modelT
 
 	slog.Debug("TypesafeJevModelRouting: Jev chose an unknown rule, using default model", "choice", answer.Choice)
 	return p.defaultTarget()
+}
+
+// extractRequestText returns the text at contentPath. Like
+// utils.ExtractStringValueFromJsonpath it accepts a string or a number, and it
+// also reads an OpenAI-style content-part array, joining its text parts and
+// skipping non-text parts (images, audio), so a message sent as parts is routed
+// on its text instead of falling back to the default target.
+func extractRequestText(content []byte, contentPath string) (string, error) {
+	if contentPath == "" {
+		return string(content), nil
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return "", err
+	}
+	value, err := utils.ExtractValueFromJsonpath(payload, contentPath)
+	if err != nil {
+		return "", err
+	}
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case []interface{}:
+		var texts []string
+		for i, item := range v {
+			switch part := item.(type) {
+			case string:
+				texts = append(texts, part)
+			case map[string]interface{}:
+				if text, ok := part["text"].(string); ok {
+					texts = append(texts, text)
+					continue
+				}
+				// A typed non-text part is skipped; an untyped object means the
+				// path points at something other than content parts.
+				if _, typed := part["type"].(string); !typed {
+					return "", fmt.Errorf("array element %d at contentPath is not a content part", i)
+				}
+			default:
+				return "", fmt.Errorf("array element %d at contentPath is not a content part", i)
+			}
+		}
+		return strings.Join(texts, "\n"), nil
+	default:
+		return "", fmt.Errorf("value at contentPath is not a string, number, or content-part array")
+	}
 }
 
 // modelTarget keeps destination selection atomic, including fallback routing.

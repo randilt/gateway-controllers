@@ -17,7 +17,10 @@ parameters:
       x-wso2-policy-advanced-param: false
       description: |
         JSONPath expression to extract the user request text from the
-        request payload for Jev to classify.
+        request payload for Jev to classify. The value may be a string, a
+        number, or an array of content parts (only the text parts are used).
+        The default reads the last message whatever its role, such as a tool
+        result in an agent loop.
       default: "$.messages[-1].content"
     routingRules:
       type: array
