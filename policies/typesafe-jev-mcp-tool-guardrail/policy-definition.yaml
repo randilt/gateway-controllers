@@ -9,34 +9,90 @@ description: |
 
 parameters:
   type: object
-  required: [scope]
+  required: [tools]
   properties:
-    scope:
-      type: string
-      minLength: 1
+    tools:
+      type: array
+      minItems: 1
       x-wso2-policy-advanced-param: false
       description: |
-        What the agent using this MCP server is meant to do, in plain words
-        (for example "A customer support assistant that looks up orders and
-        issues refunds of up to 100 USD"). Describe the job rather than giving
-        instructions: Jev judges whether each call fits it. The default
-        "destructive", "irreversible", "privilege" and "disruption" questions
-        ignore effects the scope calls for, and "out_of_scope" flags calls
-        outside it. "exfiltration", "sensitive_data" and "security_control"
-        don't mention the scope, but Jev still sees it, so a job that clearly
-        involves that data can lower their answers too. The MCP proxy doesn't
-        see the agent's conversation, so this text is the only scope Jev can
-        judge against.
+        Which tools to screen, and the scope to judge their calls against. A
+        rule names one tool exactly as it appears in tools/call, or "*" for
+        every tool without its own rule; a rule for the exact name wins over
+        "*". A tool no rule matches isn't screened, so without a "*" rule
+        only the listed tools are checked, and tools added to the MCP server
+        later aren't checked until they get a rule.
+      items:
+        type: object
+        required: [name, scope]
+        properties:
+          name:
+            type: string
+            minLength: 1
+            maxLength: 256
+            default: "*"
+            description: The tool name, exactly as it appears in tools/call params.name, or "*" for every tool without its own rule.
+          scope:
+            type: string
+            minLength: 1
+            description: |
+              What the agent is meant to do, in plain words (for example "A
+              customer support assistant that looks up orders and issues
+              refunds of up to 100 USD"). Describe the job rather than giving
+              instructions: Jev judges whether each call fits it. The default
+              "destructive", "irreversible", "privilege" and "disruption"
+              questions ignore effects the scope calls for, and "out_of_scope"
+              flags calls outside it. "exfiltration", "sensitive_data" and
+              "security_control" don't mention the scope, but Jev still sees
+              it, so a job that clearly involves that data can lower their
+              answers too. The MCP proxy doesn't see the agent's conversation,
+              so this text is the only scope Jev can judge against.
+          questions:
+            type: array
+            description: The questions to ask for this rule's tools, instead of the proxy-wide questions below.
+            items:
+              type: object
+              required: [key, type, instructions, threshold]
+              properties:
+                key:
+                  type: string
+                  description: Unique identifier for this question, used in the block assessment.
+                type:
+                  type: string
+                  enum: [noul, score, choice]
+                  description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
+                instructions:
+                  type: string
+                  description: The question to ask Jev about the tool call.
+                criteria:
+                  type: array
+                  items:
+                    type: string
+                  description: Required for types 'score' and 'choice', as for the proxy-wide questions.
+                blockOn:
+                  type: array
+                  items:
+                    type: string
+                  description: Required for type 'choice'. The 'criteria' options that count towards blocking.
+                threshold:
+                  type: number
+                  description: The same meaning as for the proxy-wide questions.
+                confidenceThreshold:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Only for type 'score', as for the proxy-wide questions.
     questions:
       type: array
       x-wso2-policy-advanced-param: false
       description: |
-        The typed questions to ask Jev about each tool call, pre-filled with
-        the defaults; edit, remove, or add questions as needed. Jev sees a
-        JSON state with "tool" ("name" and "arguments") and "scope"; refer to
-        them in instructions, for example `tool.arguments`. The call is
-        blocked if any question's answer is at or above its threshold. If the
-        list is empty, the defaults are used.
+        The typed questions to ask Jev about each screened tool call, for
+        every rule that doesn't set its own; pre-filled with the defaults, so
+        edit, remove, or add questions as needed. Jev sees a JSON state with
+        "tool" ("name" and "arguments") and "scope" (the matching rule's
+        scope); refer to them in instructions, for example `tool.arguments`.
+        The call is blocked if any question's answer is at or above its
+        threshold. If the list is empty, the defaults are used.
       items:
         type: object
         required: [key, type, instructions, threshold]
@@ -113,60 +169,6 @@ parameters:
           type: noul
           instructions: "Is the tool call in `tool` unrelated to the purpose described in `scope`?"
           threshold: 0.7
-    tools:
-      type: array
-      x-wso2-policy-advanced-param: false
-      description: |
-        Optional per-tool rules. A rule names one tool exactly as it appears
-        in tools/call, and replaces the scope and/or the questions for that
-        tool's calls; every other tool uses the scope and questions above.
-      items:
-        type: object
-        required: [name]
-        properties:
-          name:
-            type: string
-            minLength: 1
-            maxLength: 256
-            description: The tool name, exactly as it appears in tools/call params.name.
-          scope:
-            type: string
-            description: The scope to judge this tool's calls against, instead of the proxy-wide scope.
-          questions:
-            type: array
-            description: The questions to ask for this tool's calls, instead of the proxy-wide questions.
-            items:
-              type: object
-              required: [key, type, instructions, threshold]
-              properties:
-                key:
-                  type: string
-                  description: Unique identifier for this question, used in the block assessment.
-                type:
-                  type: string
-                  enum: [noul, score, choice]
-                  description: "'noul' returns a 0-1 probability; 'score' returns a position on 'criteria'; 'choice' returns a probability for each option in 'criteria'."
-                instructions:
-                  type: string
-                  description: The question to ask Jev about the tool call.
-                criteria:
-                  type: array
-                  items:
-                    type: string
-                  description: Required for types 'score' and 'choice', as for the proxy-wide questions.
-                blockOn:
-                  type: array
-                  items:
-                    type: string
-                  description: Required for type 'choice'. The 'criteria' options that count towards blocking.
-                threshold:
-                  type: number
-                  description: The same meaning as for the proxy-wide questions.
-                confidenceThreshold:
-                  type: number
-                  minimum: 0
-                  maximum: 1
-                  description: Only for type 'score', as for the proxy-wide questions.
     mode:
       type: string
       enum: [enforce, monitor]

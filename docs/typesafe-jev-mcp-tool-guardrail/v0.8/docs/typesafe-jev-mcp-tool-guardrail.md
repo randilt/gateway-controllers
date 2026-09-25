@@ -7,7 +7,7 @@ title: "Overview"
 
 The TypeSafe Jev MCP Tool Guardrail policy screens MCP `tools/call` requests using [TypeSafe AI's Jev](https://typesafe.ai/) "System One" model before they reach the MCP server. Jev doesn't generate text: it takes a state and a battery of typed questions, and returns calibrated structured answers. A `noul` question returns a yes/no probability, a `score` question returns a position on a scale you define, and a `choice` question returns a probability for each option you define.
 
-For each tool call, the policy sends Jev a JSON state holding the tool name, its arguments and, when configured, a plain description of what the agent is for:
+For each screened tool call, the policy sends Jev a JSON state holding the tool name, its arguments and the scope from the matching [tool rule](#tool-rules), a plain description of what the agent is for:
 
 ```json
 {
@@ -23,9 +23,10 @@ Use this policy alongside `mcp-acl-list` and `mcp-authz`. Those decide which too
 ## Features
 
 - Screens `tools/call` requests only; every other MCP method, notification and response passes through without calling Jev
+- Tool rules choose which tools are screened and against which scope: name one tool, or use `*` for every tool without its own rule
 - Default questions covering destructive, irreversible, data-exfiltrating, secret-reading, privilege-raising, disruptive, security-weakening and out-of-scope calls; the destructive, irreversible, privilege and disruption questions don't flag effects the scope calls for
 - The default questions are pre-filled in the policy configuration, so they can be seen and edited
-- Per-tool rules: give a named tool its own scope and/or questions
+- A tool rule can also replace the questions for its tools
 - Configurable battery of typed questions (`noul`, `score`, `choice`) that can refer to `tool.name`, `tool.arguments` and `scope`
 - Blocks with a JSON-RPC error that echoes the request `id` and `Mcp-Session-Id`, framed as a server-sent event when the request was sent with `Content-Type: text/event-stream`
 - Rejects request bodies that can't be read unambiguously (invalid JSON, batches, duplicate or case-variant members), so a body can't be crafted to screen different arguments from the ones the MCP server runs
@@ -62,9 +63,8 @@ jev_model = "jev-latest"
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `scope` | string | Yes | — | What the agent using this MCP server is meant to do, in plain words. It is sent to Jev as `scope`: the default `destructive`, `irreversible`, `privilege` and `disruption` questions ignore effects the scope calls for, and `out_of_scope` flags calls outside it. `exfiltration`, `sensitive_data` and `security_control` don't mention the scope, but Jev still sees it, so a job that clearly involves that data can lower their answers too: a raw card number passed to `orderPizza` was flagged under "A calculator and pizza ordering assistant…", but not under "A pizza ordering assistant that places pizza orders for the customer.". Describe the job rather than giving instructions: "A calculator and pizza ordering assistant that adds numbers and places pizza orders" works, while "A calculator assistant; allow pizza ordering" doesn't, because Jev judges whether each call fits the job described. |
-| `questions` | array of objects | No | The [default questions](#default-questions), pre-filled | The typed questions to ask Jev about each tool call. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
-| `tools` | array of objects | No | — | Per-tool rules; see [Per-tool rules](#per-tool-rules). |
+| `tools` | array of objects | Yes | — | Which tools to screen, and the scope to judge their calls against; see [Tool rules](#tool-rules). At least one rule. |
+| `questions` | array of objects | No | The [default questions](#default-questions), pre-filled | The typed questions to ask Jev about each screened tool call, for every rule that doesn't set its own. The call is blocked if any question's answer is at or above its threshold; a `score` question with a `confidenceThreshold` also needs Jev's confidence to reach it, and is otherwise only recorded. |
 | `mode` | `enforce` \| `monitor` | No | `enforce` | `enforce` blocks when a question crosses its threshold. `monitor` never blocks — see [Monitor mode](#monitor-mode). |
 | `timeout` | string (Go duration) | No | `5s` | Maximum time to wait for Jev, for example `"5s"` or `"1500ms"`, up to `"30s"`. Includes one retry when Jev returns `429` (rate limited) or `529` (overloaded). A timeout is handled per `passthroughOnError`. |
 | `passthroughOnError` | boolean | No | `false` | When `true`, lets the call through if the Jev API call fails or times out (fail-open). When `false`, the call is rejected with a JSON-RPC internal error (fail-closed). |
@@ -97,37 +97,66 @@ The `questions` parameter is pre-filled with these `noul` questions, each blocki
 | `security_control` | Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging? |
 | `out_of_scope` | Is the tool call in `tool` unrelated to the purpose described in `scope`? |
 
-The questions that mention `scope` keep the guardrail from blocking the work the agent exists to do, such as a support assistant replying to a customer or issuing a refund within its limit, while still flagging calls outside that job. This is why `scope` is required: without one, these questions have nothing to compare against.
+The questions that mention `scope` keep the guardrail from blocking the work the agent exists to do, such as a support assistant replying to a customer or issuing a refund within its limit, while still flagging calls outside that job. This is why every tool rule needs a `scope`: without one, these questions have nothing to compare against.
 
-#### Per-tool rules
+#### Tool rules
 
-MCP proxies take policies for the whole proxy, so per-tool settings go in the `tools` parameter. Each rule names one tool, exactly as it appears in `tools/call` (`params.name`), and replaces the scope and/or the questions for that tool's calls. Tools without a rule use the proxy-wide `scope` and `questions`.
+The `tools` parameter chooses which tools are screened and the scope each call is judged against. Each rule names one tool, exactly as it appears in `tools/call` (`params.name`), or `*` for every tool without its own rule. MCP proxies take policies for the whole proxy, so this list is how the policy is set up per tool, as in `mcp-authz`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | The tool name. Each tool can have one rule. |
-| `scope` | string | No | The scope to judge this tool's calls against, instead of the proxy-wide `scope`. |
-| `questions` | array of objects | No | The questions to ask for this tool's calls, instead of the proxy-wide `questions`. Same shape as [`questions`](#question-object-shape). |
+| `name` | string | Yes | The tool name, or `*`. Each name, `*` included, can have one rule. |
+| `scope` | string | Yes | What the agent is meant to do, in plain words; see [Writing a scope](#writing-a-scope). |
+| `questions` | array of objects | No | The questions to ask for this rule's tools, instead of the proxy-wide `questions`. Same shape as [`questions`](#question-object-shape). |
 
-A rule must set `scope`, `questions`, or both. For example, a calculator assistant whose MCP server also has a pizza ordering tool:
+How a call is matched:
+
+- A rule for the exact tool name wins over `*`. Only one rule applies to a call, so each screened call is one Jev request.
+- A tool that no rule matches isn't screened and passes through without calling Jev. Without a `*` rule, only the listed tools are checked, and tools added to the MCP server later aren't checked until they get a rule.
+- A rule's `questions` replace the proxy-wide questions for that rule's tools; they aren't added to them. To keep the default questions for a tool and add one of your own, list the defaults in the rule too.
+
+To screen every tool, use one `*` rule:
 
 ```yaml
 params:
-  scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
+  tools:
+    - name: "*"
+      scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
+```
+
+To screen every tool, but judge one of them against a different scope, add a rule for it:
+
+```yaml
+params:
+  tools:
+    - name: "*"
+      scope: "A calculator assistant that adds numbers and echoes short messages back to the user."
+    - name: orderPizza
+      scope: "A pizza ordering assistant that places pizza orders for the customer."
+```
+
+To screen only some tools, leave out the `*` rule:
+
+```yaml
+params:
   tools:
     - name: orderPizza
       scope: "A pizza ordering assistant that places pizza orders for the customer."
 ```
 
-Calls to `orderPizza` are judged against the pizza ordering scope; every other tool is judged against the calculator scope.
+Here only `orderPizza` calls are sent to Jev; every other tool call goes straight to the MCP server.
 
-A rule's `questions` replace the proxy-wide questions for that tool; they aren't added to them. To keep the default questions for a tool and add one of your own, list the defaults in the rule too.
+##### Writing a scope
+
+The scope is sent to Jev as `scope`. The default `destructive`, `irreversible`, `privilege` and `disruption` questions ignore effects the scope calls for, and `out_of_scope` flags calls outside it. `exfiltration`, `sensitive_data` and `security_control` don't mention the scope, but Jev still sees it, so a job that clearly involves that data can lower their answers too: a raw card number passed to `orderPizza` was flagged under "A calculator and pizza ordering assistant…", but not under "A pizza ordering assistant that places pizza orders for the customer.".
+
+Describe the job rather than giving instructions: "A calculator and pizza ordering assistant that adds numbers and places pizza orders" works, while "A calculator assistant; allow pizza ordering" doesn't, because Jev judges whether each call fits the job described.
 
 #### What is screened
 
 - **Screened:** a `POST` to the proxy's `/mcp` endpoint whose JSON-RPC `method` is `tools/call`. The policy reads `params.name` and `params.arguments` from the request body, on every MCP protocol version.
-- **Passed through without calling Jev:** every other method (`initialize`, `tools/list`, `resources/read`, and so on), notifications, JSON-RPC responses sent by the client, and requests to other paths.
-- **Rejected before calling Jev:** request bodies the policy can't read unambiguously, since the MCP server might read them differently:
+- **Passed through without calling Jev:** a `tools/call` for a tool no [tool rule](#tool-rules) matches, every other method (`initialize`, `tools/list`, `resources/read`, and so on), notifications, JSON-RPC responses sent by the client, and requests to other paths.
+- **Rejected before calling Jev:** request bodies the policy can't read unambiguously, since the MCP server might read them differently. This happens before the tool rules are matched, so a body can't name one tool to the policy and another to the MCP server:
 
 | Case | HTTP status | JSON-RPC code |
 |------|-------------|---------------|
@@ -177,6 +206,7 @@ In both modes the policy writes Jev's token usage to `typesafe-jev-mcp-tool-guar
 #### Limitations
 
 - **The MCP proxy doesn't see the agent's conversation.** Scope is judged against the configured `scope` text, not against what the user asked for.
+- **Tools without a rule aren't screened.** Without a `*` rule, a tool added to the MCP server later isn't checked until it gets a rule.
 - **Jev judges what the arguments say.** Tool descriptions aren't part of a `tools/call` request, so Jev sees only the name and arguments. For example, an `echo` tool asked to repeat the text "rm -rf /" can be flagged as destructive.
 - **Arguments are untrusted input.** Adversarial text inside arguments can influence Jev's answers ([jev-1.13 known weaknesses](https://docs.typesafe.ai/model-jaggedness/jev-1.13)). Keep `mcp-acl-list` and `mcp-authz` in place for rules that must always hold.
 - **Latency.** Each tool call waits for one Jev request, bounded by `timeout`.
@@ -199,7 +229,7 @@ Inside the `api-platform` repository, add the policy package under `policies:` i
 
 ### Example 1: Screen Tool Calls with the Default Questions
 
-Attach the policy to an MCP proxy with a `scope`, to use the default questions:
+Attach the policy to an MCP proxy with one `*` rule, to screen every tool with the default questions:
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1
@@ -216,7 +246,9 @@ spec:
     - name: typesafe-jev-mcp-tool-guardrail
       version: v0
       params:
-        scope: "A customer support assistant that looks up orders and answers product questions."
+        tools:
+          - name: "*"
+            scope: "A customer support assistant that looks up orders and answers product questions."
 ```
 
 A read-only call passes through to the MCP server:
@@ -250,7 +282,9 @@ policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
-      scope: "A support assistant that looks up orders and replies to customers by email."
+      tools:
+        - name: "*"
+          scope: "A support assistant that looks up orders and replies to customers by email."
       showAssessment: true
       questions:
         - key: risk
@@ -278,7 +312,9 @@ policies:
   - name: typesafe-jev-mcp-tool-guardrail
     version: v0
     params:
-      scope: "A support assistant that looks up orders and replies to customers by email."
+      tools:
+        - name: "*"
+          scope: "A support assistant that looks up orders and replies to customers by email."
       mode: monitor
       passthroughOnError: true
       timeout: "2s"

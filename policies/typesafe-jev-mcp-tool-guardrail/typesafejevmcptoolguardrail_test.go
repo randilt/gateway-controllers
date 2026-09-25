@@ -96,7 +96,7 @@ var benignAnswers = withDefaultAnswers(map[string]float64{"destructive": 0.02, "
 
 func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *TypesafeJevMcpToolGuardrailPolicy {
 	t.Helper()
-	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL, "scope": "A test assistant."}
+	params := map[string]interface{}{"apiKey": "test-key", "baseURL": baseURL, "tools": everyTool("A test assistant.")}
 	for k, v := range extra {
 		params[k] = v
 	}
@@ -105,6 +105,11 @@ func newPolicy(t *testing.T, baseURL string, extra map[string]interface{}) *Type
 		t.Fatalf("GetPolicy: %v", err)
 	}
 	return p.(*TypesafeJevMcpToolGuardrailPolicy)
+}
+
+// everyTool is a tools list with one "*" rule, which screens every tool.
+func everyTool(scope string) []interface{} {
+	return []interface{}{map[string]interface{}{"name": "*", "scope": scope}}
 }
 
 func mcpRequest(body string, headers map[string][]string) *policy.RequestContext {
@@ -189,22 +194,31 @@ func TestGetPolicy_Params(t *testing.T) {
 		{name: "defaults", params: map[string]interface{}{"apiKey": "k"}},
 		{name: "missing apiKey", params: map[string]interface{}{}, wantErr: "'apiKey' parameter is required"},
 		{name: "empty apiKey", params: map[string]interface{}{"apiKey": ""}, wantErr: "'apiKey' must be a non-empty string"},
-		{name: "missing scope", params: map[string]interface{}{"apiKey": "k", "scope": nil}, wantErr: "'scope' is required"},
-		{name: "blank scope", params: map[string]interface{}{"apiKey": "k", "scope": "   "}, wantErr: "'scope' is required"},
-		{name: "scope not a string", params: map[string]interface{}{"apiKey": "k", "scope": 3}, wantErr: "'scope' is required"},
+		{name: "missing tools", params: map[string]interface{}{"apiKey": "k", "tools": nil}, wantErr: "'tools' is required"},
+		{name: "empty tools", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{}}, wantErr: "'tools' is required"},
 		{name: "tools not an array", params: map[string]interface{}{"apiKey": "k", "tools": "orderPizza"}, wantErr: "'tools' must be an array"},
-		{name: "tool rule without name", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+		{name: "top-level scope", params: map[string]interface{}{"apiKey": "k", "scope": "A calculator assistant."}, wantErr: "not at the top level"},
+		{name: "rule not an object", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{"*"}}, wantErr: "'tools[0]' must be an object"},
+		{name: "rule without name", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
 			map[string]interface{}{"scope": "x"}}}, wantErr: "'tools[0].name' is required"},
-		{name: "duplicate tool rule", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
-			map[string]interface{}{"name": "add", "scope": "x"}, map[string]interface{}{"name": "add", "scope": "y"}}}, wantErr: "is a duplicate"},
-		{name: "tool rule with nothing to override", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
-			map[string]interface{}{"name": "add"}}}, wantErr: "must set 'scope', 'questions', or both"},
-		{name: "tool rule with an invalid question", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
-			map[string]interface{}{"name": "add", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 2}}}}},
+		{name: "rule without scope", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add"}}}, wantErr: "'tools[0].scope' is required"},
+		{name: "rule with blank scope", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "   "}}}, wantErr: "'tools[0].scope' is required"},
+		{name: "rule with non-string scope", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": 3}}}, wantErr: "'tools[0].scope' is required"},
+		{name: "duplicate rule", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add", "scope": "x"}, map[string]interface{}{"name": " add ", "scope": "y"}}}, wantErr: "'tools[1].name' \"add\" is a duplicate"},
+		{name: "duplicate * rule", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "x"}, map[string]interface{}{"name": "*", "scope": "y"}}}, wantErr: "'tools[1].name' \"*\" is a duplicate"},
+		{name: "rule with an invalid question", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "add", "scope": "x", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 2}}}}},
 			wantErr: "'tools[0]': 'questions[0].threshold'"},
-		{name: "valid tool rules", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
-			map[string]interface{}{"name": "orderPizza", "scope": "A pizza ordering assistant."},
-			map[string]interface{}{"name": "add", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 0.5}}}}}},
+		{name: "only exact rules", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "orderPizza", "scope": "A pizza ordering assistant."}}}},
+		{name: "exact and * rules", params: map[string]interface{}{"apiKey": "k", "tools": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "A calculator assistant."},
+			map[string]interface{}{"name": "add", "scope": "A calculator assistant.", "questions": []interface{}{map[string]interface{}{"key": "a", "type": "noul", "instructions": "x?", "threshold": 0.5}}}}}},
 		{name: "bad mode", params: map[string]interface{}{"apiKey": "k", "mode": "block"}, wantErr: "'mode' must be"},
 		{name: "bad timeout", params: map[string]interface{}{"apiKey": "k", "timeout": "soon"}, wantErr: "not a valid duration"},
 		{name: "timeout too long", params: map[string]interface{}{"apiKey": "k", "timeout": "31s"}, wantErr: "at most 30s"},
@@ -275,9 +289,9 @@ func TestGetPolicy_Params(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Every case gets a valid scope unless it sets its own.
-			if _, ok := tt.params["scope"]; !ok && tt.params["apiKey"] != nil {
-				tt.params["scope"] = "A test assistant."
+			// Every case gets a valid "*" rule unless it sets its own tools.
+			if _, ok := tt.params["tools"]; !ok && tt.params["apiKey"] != nil {
+				tt.params["tools"] = everyTool("A test assistant.")
 			}
 			_, err := GetPolicy(policy.PolicyMetadata{}, tt.params)
 			if tt.wantErr == "" {
@@ -312,9 +326,9 @@ func TestDefaultQuestions(t *testing.T) {
 		t.Fatalf("default questions = %s, want %s", got, want)
 	}
 
-	p := newPolicy(t, "http://unused", map[string]interface{}{"scope": "  A calculator assistant.  "})
-	if p.scope != "A calculator assistant." {
-		t.Fatalf("scope = %q, want trimmed", p.scope)
+	p := newPolicy(t, "http://unused", map[string]interface{}{"tools": everyTool("  A calculator assistant.  ")})
+	if p.anyTool == nil || p.anyTool.scope != "A calculator assistant." {
+		t.Fatalf("\"*\" rule = %+v, want its scope trimmed", p.anyTool)
 	}
 	if len(p.questions) != len(defaultBattery) {
 		t.Fatalf("omitted questions gave %d questions, want the %d defaults", len(p.questions), len(defaultBattery))
@@ -403,7 +417,7 @@ func TestOnRequestBody_PassesThroughWithoutCallingJev(t *testing.T) {
 
 func TestOnRequestBody_SendsToolCallStateAndQuestions(t *testing.T) {
 	jev := newMockJev(t, answering(benignAnswers))
-	p := newPolicy(t, jev.server.URL, map[string]interface{}{"scope": "A support assistant.", "model": "jev-1.13.0"})
+	p := newPolicy(t, jev.server.URL, map[string]interface{}{"tools": everyTool("A support assistant."), "model": "jev-1.13.0"})
 
 	mustPassthrough(t, p.OnRequestBody(context.Background(), mcpRequest(toolCallDrop, nil), nil))
 
@@ -839,34 +853,44 @@ func TestErrorSnippet_TruncatesLongBodies(t *testing.T) {
 	}
 }
 
-// A tool rule replaces the scope and/or questions for that tool only; other tools
-// keep the proxy-wide ones.
-func TestOnRequestBody_ToolRulesOverrideScopeAndQuestions(t *testing.T) {
-	type sentRequest struct {
-		State struct {
-			Tool struct {
-				Name string `json:"name"`
-			} `json:"tool"`
-			Scope string `json:"scope"`
-		} `json:"state"`
-		Questions map[string]json.RawMessage `json:"questions"`
-	}
+type sentToJev struct {
+	State struct {
+		Tool struct {
+			Name string `json:"name"`
+		} `json:"tool"`
+		Scope string `json:"scope"`
+	} `json:"state"`
+	Questions map[string]json.RawMessage `json:"questions"`
+}
+
+// callTool sends a tools/call for the named tool and returns the policy's action.
+func callTool(p *TypesafeJevMcpToolGuardrailPolicy, tool string) policy.RequestAction {
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`
+	return p.OnRequestBody(context.Background(), mcpRequest(body, nil), nil)
+}
+
+// A rule for the exact tool name wins over "*", and a rule's questions replace the
+// proxy-wide ones for that rule's tools only.
+func TestOnRequestBody_ExactRuleWinsOverWildcard(t *testing.T) {
 	jev := newMockJev(t, func(w http.ResponseWriter, _ int32) {
 		// Every question any rule can ask, all low.
 		_, _ = w.Write(jevAnswers(withDefaultAnswers(map[string]float64{"pizza_limit": 0.01})))
 	})
 	p := newPolicy(t, jev.server.URL, map[string]interface{}{
-		"scope": "A calculator assistant.",
 		"tools": []interface{}{
 			map[string]interface{}{"name": "orderPizza", "scope": "A pizza ordering assistant."},
-			map[string]interface{}{"name": "viewPizzaMenu", "questions": []interface{}{
+			map[string]interface{}{"name": "*", "scope": "A calculator assistant."},
+			map[string]interface{}{"name": "viewPizzaMenu", "scope": "A pizza menu assistant.", "questions": []interface{}{
 				map[string]interface{}{"key": "pizza_limit", "type": "noul", "instructions": "Does `tool` look at more than one menu?", "threshold": 0.7}}},
 		},
 	})
-	sent := func(tool string) sentRequest {
-		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + tool + `","arguments":{}}}`
-		mustPassthrough(t, p.OnRequestBody(context.Background(), mcpRequest(body, nil), nil))
-		var got sentRequest
+	sent := func(tool string) sentToJev {
+		before := jev.calls.Load()
+		mustPassthrough(t, callTool(p, tool))
+		if jev.calls.Load() != before+1 {
+			t.Fatalf("%s: Jev calls = %d, want one call", tool, jev.calls.Load()-before)
+		}
+		var got sentToJev
 		if err := json.Unmarshal(jev.lastBody.Load().([]byte), &got); err != nil {
 			t.Fatal(err)
 		}
@@ -874,12 +898,40 @@ func TestOnRequestBody_ToolRulesOverrideScopeAndQuestions(t *testing.T) {
 	}
 
 	if got := sent("orderPizza"); got.State.Scope != "A pizza ordering assistant." || len(got.Questions) != len(defaultBattery) {
-		t.Fatalf("orderPizza: scope %q, %d questions; want the rule's scope and the default questions", got.State.Scope, len(got.Questions))
+		t.Fatalf("orderPizza: scope %q, %d questions; want its rule's scope and the proxy-wide questions", got.State.Scope, len(got.Questions))
 	}
-	if got := sent("viewPizzaMenu"); got.State.Scope != "A calculator assistant." || len(got.Questions) != 1 || got.Questions["pizza_limit"] == nil {
-		t.Fatalf("viewPizzaMenu: scope %q, questions %v; want the proxy scope and only the rule's question", got.State.Scope, got.Questions)
+	if got := sent("viewPizzaMenu"); got.State.Scope != "A pizza menu assistant." || len(got.Questions) != 1 || got.Questions["pizza_limit"] == nil {
+		t.Fatalf("viewPizzaMenu: scope %q, questions %v; want its rule's scope and only its rule's question", got.State.Scope, got.Questions)
 	}
 	if got := sent("add"); got.State.Scope != "A calculator assistant." || len(got.Questions) != len(defaultBattery) {
-		t.Fatalf("add: scope %q, %d questions; want the proxy-wide scope and questions", got.State.Scope, len(got.Questions))
+		t.Fatalf("add: scope %q, %d questions; want the \"*\" rule's scope and the proxy-wide questions", got.State.Scope, len(got.Questions))
+	}
+}
+
+// Without a "*" rule, only the listed tools are screened.
+func TestOnRequestBody_OnlyListedToolsAreScreenedWithoutWildcard(t *testing.T) {
+	jev := newMockJev(t, answering(map[string]float64{"destructive": 0.95}))
+	p := newPolicy(t, jev.server.URL, map[string]interface{}{
+		"tools": []interface{}{map[string]interface{}{"name": "run_sql", "scope": "A support assistant."}},
+	})
+
+	mustPassthrough(t, callTool(p, "add"))
+	if n := jev.calls.Load(); n != 0 {
+		t.Fatalf("unlisted tool: Jev called %d times, want 0", n)
+	}
+
+	resp := mustImmediate(t, p.OnRequestBody(context.Background(), mcpRequest(toolCallDrop, nil), nil))
+	if _, code, _, _ := decodeError(t, resp); code != jsonRpcErrCodeBlocked || jev.calls.Load() != 1 {
+		t.Fatalf("listed tool: code %d after %d Jev calls, want blocked after 1", code, jev.calls.Load())
+	}
+
+	// An ambiguous body is still rejected before any rule is looked up, so a second
+	// name can't make a listed tool look unlisted.
+	dup := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","name":"run_sql","arguments":{}}}`
+	if _, code, _, _ := decodeError(t, mustImmediate(t, p.OnRequestBody(context.Background(), mcpRequest(dup, nil), nil))); code != jsonRpcErrCodeRequest {
+		t.Fatalf("duplicate name: code %d, want %d", code, jsonRpcErrCodeRequest)
+	}
+	if n := jev.calls.Load(); n != 1 {
+		t.Fatalf("Jev called %d times, want 1", n)
 	}
 }

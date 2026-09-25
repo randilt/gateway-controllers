@@ -24,11 +24,12 @@
 //
 // The default battery asks whether the call is destructive, irreversible, sends
 // private data out, reads secrets, raises privileges, disrupts a running system,
-// weakens a security control, or falls outside the scope. The scope is required: it
-// describes the agent's job, so effects it calls for aren't flagged and a call
-// outside it is. Per-tool rules can give a named tool its own scope or questions.
-// The MCP proxy never sees the agent's conversation, so scope is judged against
-// the configured text only.
+// weakens a security control, or falls outside the scope. Which tools are screened,
+// and against which scope, is set by rules: a rule names one tool, or "*" for
+// every tool without its own rule, and gives the scope that describes the agent's
+// job, so effects it calls for aren't flagged and a call outside it is. A tool no
+// rule matches isn't screened. The MCP proxy never sees the agent's conversation,
+// so scope is judged against the configured text only.
 package typesafejevmcptoolguardrail
 
 import (
@@ -148,8 +149,11 @@ func defaultQuestions() []guardrailQuestion {
 	return questions
 }
 
-// toolRule overrides the scope and/or the questions for one tool. An empty scope
-// or nil questions means the proxy-wide value is used.
+// wildcardToolName is the rule name that matches every tool without its own rule.
+const wildcardToolName = "*"
+
+// toolRule is the scope, and optionally the questions, to screen a tool's calls
+// with. Nil questions means the proxy-wide questions are used.
 type toolRule struct {
 	scope     string
 	questions []guardrailQuestion
@@ -162,9 +166,9 @@ type TypesafeJevMcpToolGuardrailPolicy struct {
 	model   string
 	client  *http.Client
 
-	scope              string
 	questions          []guardrailQuestion
 	tools              map[string]toolRule
+	anyTool            *toolRule
 	mode               string
 	timeout            time.Duration
 	passthroughOnError bool
@@ -196,7 +200,7 @@ func GetPolicy(
 	}
 
 	slog.Debug("TypesafeJevMcpToolGuardrail: Policy initialized",
-		"questions", len(p.questions), "toolRules", len(p.tools), "mode", p.mode)
+		"questions", len(p.questions), "toolRules", len(p.tools), "wildcardRule", p.anyTool != nil, "mode", p.mode)
 
 	return p, nil
 }
@@ -356,18 +360,23 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) screen(ctx context.Context, shared *
 			"MCP tool call could not be checked by guardrail", call.ID, nil)
 	}
 
-	scope, questions := p.scope, p.questions
-	if rule, ok := p.tools[call.Name]; ok {
-		if rule.scope != "" {
-			scope = rule.scope
+	// A rule for the exact tool name wins over "*". A tool no rule matches isn't
+	// screened, so it costs no Jev call.
+	rule, ok := p.tools[call.Name]
+	if !ok {
+		if p.anyTool == nil {
+			slog.Debug("TypesafeJevMcpToolGuardrail: no rule matches tool, not screened", "tool", call.Name)
+			return policy.UpstreamRequestModifications{}
 		}
-		if rule.questions != nil {
-			questions = rule.questions
-		}
+		rule = *p.anyTool
+	}
+	questions := p.questions
+	if rule.questions != nil {
+		questions = rule.questions
 	}
 	state := toolCallState{
 		Tool:  toolCallStateTool{Name: call.Name, Arguments: call.Arguments},
-		Scope: scope,
+		Scope: rule.scope,
 	}
 	answers, usage, err := p.callJev(ctx, state, questions, p.timeout)
 	if err != nil {
@@ -915,11 +924,9 @@ func stringParamOrDefault(params map[string]interface{}, key, def string) string
 }
 
 func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interface{}) error {
-	scope, _ := params["scope"].(string)
-	p.scope = strings.TrimSpace(scope)
-	if p.scope == "" {
-		// The default questions judge each call against the scope, so it can't be left out.
-		return fmt.Errorf("'scope' is required: describe, in plain words, what the agent using this MCP server is meant to do")
+	if _, ok := params["scope"]; ok {
+		// Left in, a top-level scope would be silently ignored.
+		return fmt.Errorf("'scope' is set per rule in 'tools', not at the top level; for example, a rule with name \"*\" and a scope screens every tool")
 	}
 
 	if modeRaw, ok := params["mode"]; ok {
@@ -970,11 +977,11 @@ func (p *TypesafeJevMcpToolGuardrailPolicy) parseParams(params map[string]interf
 	}
 	p.questions = questions
 
-	tools, err := parseToolRules(params["tools"])
+	tools, anyTool, err := parseToolRules(params["tools"])
 	if err != nil {
 		return err
 	}
-	p.tools = tools
+	p.tools, p.anyTool = tools, anyTool
 	return nil
 }
 
@@ -1011,50 +1018,52 @@ func parseQuestionList(raw interface{}) ([]guardrailQuestion, error) {
 	return questions, nil
 }
 
-// parseToolRules reads the per-tool overrides. Each rule names one tool exactly,
-// as it appears in tools/call params.name; tools without a rule use the
-// proxy-wide scope and questions.
-func parseToolRules(raw interface{}) (map[string]toolRule, error) {
-	if raw == nil {
-		return nil, nil
-	}
+// parseToolRules reads the rules that choose which tools are screened. Each rule
+// names one tool exactly, as it appears in tools/call params.name, or "*" for
+// every tool without its own rule, and gives the scope to judge its calls against.
+// The "*" rule is returned separately.
+func parseToolRules(raw interface{}) (map[string]toolRule, *toolRule, error) {
 	list, ok := raw.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("'tools' must be an array")
+	if raw != nil && !ok {
+		return nil, nil, fmt.Errorf("'tools' must be an array")
+	}
+	if len(list) == 0 {
+		return nil, nil, fmt.Errorf("'tools' is required: add at least one rule; a rule with name \"*\" screens every tool")
 	}
 	rules := make(map[string]toolRule, len(list))
+	var anyTool *toolRule
 	for i, item := range list {
 		ruleMap, ok := item.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("'tools[%d]' must be an object", i)
+			return nil, nil, fmt.Errorf("'tools[%d]' must be an object", i)
 		}
 		name, _ := ruleMap["name"].(string)
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return nil, fmt.Errorf("'tools[%d].name' is required and must be a non-empty string", i)
+			return nil, nil, fmt.Errorf("'tools[%d].name' is required and must be a non-empty string", i)
 		}
-		if _, dup := rules[name]; dup {
-			return nil, fmt.Errorf("'tools[%d].name' %q is a duplicate; each tool can have only one rule", i, name)
+		_, dup := rules[name]
+		if dup || (name == wildcardToolName && anyTool != nil) {
+			return nil, nil, fmt.Errorf("'tools[%d].name' %q is a duplicate; each tool can have only one rule", i, name)
 		}
-		var rule toolRule
-		if scopeRaw, ok := ruleMap["scope"]; ok {
-			scope, ok := scopeRaw.(string)
-			if !ok {
-				return nil, fmt.Errorf("'tools[%d].scope' must be a string", i)
-			}
-			rule.scope = strings.TrimSpace(scope)
+		scope, _ := ruleMap["scope"].(string)
+		rule := toolRule{scope: strings.TrimSpace(scope)}
+		if rule.scope == "" {
+			// The default questions judge each call against the scope, so it can't be left out.
+			return nil, nil, fmt.Errorf("'tools[%d].scope' is required: describe, in plain words, what the agent is meant to do with this tool, or with this MCP server for \"*\"", i)
 		}
 		questions, err := parseQuestionList(ruleMap["questions"])
 		if err != nil {
-			return nil, fmt.Errorf("'tools[%d]': %w", i, err)
+			return nil, nil, fmt.Errorf("'tools[%d]': %w", i, err)
 		}
 		rule.questions = questions
-		if rule.scope == "" && rule.questions == nil {
-			return nil, fmt.Errorf("'tools[%d]' must set 'scope', 'questions', or both", i)
+		if name == wildcardToolName {
+			anyTool = &rule
+			continue
 		}
 		rules[name] = rule
 	}
-	return rules, nil
+	return rules, anyTool, nil
 }
 
 func parseQuestion(qMap map[string]interface{}, index int) (guardrailQuestion, error) {
