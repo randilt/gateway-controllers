@@ -77,6 +77,11 @@ const (
 	statusJevOverloaded = 529
 	retryBackoff        = 250 * time.Millisecond
 
+	// A Jev answer is a few kilobytes, so a larger body is not a valid answer.
+	maxJevResponseBytes = 1 << 20
+	// Only the start of an error body goes into error messages, which are logged.
+	maxJevErrorBodyBytes = 512
+
 	// SharedContext.Metadata keys. Suffixed with the phase ("request" or
 	// "response") so both phases can record without overwriting each other.
 	metaKeyAssessmentsPrefix   = "typesafe-jev-content-safety:assessments:"
@@ -653,7 +658,7 @@ func (p *TypesafeJevContentSafetyPolicy) callJev(ctx context.Context, state stri
 		return nil, nil, err
 	}
 	if status != http.StatusOK {
-		return nil, nil, fmt.Errorf("Jev API returned status %d: %s", status, string(body))
+		return nil, nil, fmt.Errorf("Jev API returned status %d: %s", status, errorSnippet(body))
 	}
 
 	var parsed jevSystemOneResponse
@@ -678,11 +683,28 @@ func (p *TypesafeJevContentSafetyPolicy) postSystemOne(ctx context.Context, payl
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJevResponseBytes+1))
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to read Jev response: %w", err)
 	}
+	if len(body) > maxJevResponseBytes {
+		// A successful answer that doesn't fit is rejected rather than decoded
+		// from a truncated body. An error body only feeds a diagnostic, so it is
+		// cut instead, keeping the status for the retry decision.
+		if resp.StatusCode == http.StatusOK {
+			return 0, nil, fmt.Errorf("Jev response exceeds %d bytes", maxJevResponseBytes)
+		}
+		body = body[:maxJevResponseBytes]
+	}
 	return resp.StatusCode, body, nil
+}
+
+// errorSnippet returns the start of a Jev error body for an error message.
+func errorSnippet(body []byte) string {
+	if len(body) <= maxJevErrorBodyBytes {
+		return string(body)
+	}
+	return string(body[:maxJevErrorBodyBytes]) + "... (truncated)"
 }
 
 // decodeNoulAnswer requires the "noul" field to actually be present: a
