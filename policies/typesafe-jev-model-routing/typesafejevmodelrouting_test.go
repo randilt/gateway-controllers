@@ -18,6 +18,7 @@
 package typesafejevmodelrouting
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -348,5 +349,41 @@ func TestOnRequestBody_RecordsJevUsage(t *testing.T) {
 	usage, ok := req.Metadata[metadataKeyUsage].(map[string]interface{})
 	if !ok || usage["input_tokens"] != 42 || usage["output_tokens"] != 3 {
 		t.Fatalf("usage metadata = %#v", req.Metadata[metadataKeyUsage])
+	}
+}
+
+// A successful Jev response over the size limit is rejected instead of being
+// decoded from a truncated body.
+func TestPostSystemOne_RejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{},"pad":"` + strings.Repeat("x", maxJevResponseBytes) + `"}`))
+	}))
+	defer srv.Close()
+	p := &TypesafeJevModelRoutingPolicy{apiKey: "k", baseURL: srv.URL, client: &http.Client{}}
+	_, _, err := p.postSystemOne(context.Background(), []byte("{}"))
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v, want a size-limit error", err)
+	}
+}
+
+// A non-200 response keeps its status, but only the start of its body reaches
+// the error message.
+func TestErrorSnippet_TruncatesLongBodies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("e", 4*maxJevErrorBodyBytes)))
+	}))
+	defer srv.Close()
+	p := &TypesafeJevModelRoutingPolicy{apiKey: "k", baseURL: srv.URL, client: &http.Client{}}
+	status, body, err := p.postSystemOne(context.Background(), []byte("{}"))
+	if err != nil || status != http.StatusBadGateway {
+		t.Fatalf("status = %d, err = %v, want 502 and no error", status, err)
+	}
+	snippet := errorSnippet(body)
+	if len(snippet) > maxJevErrorBodyBytes+len("... (truncated)") || !strings.HasSuffix(snippet, "... (truncated)") {
+		t.Fatalf("snippet has %d bytes, want at most %d plus the truncation marker", len(snippet), maxJevErrorBodyBytes)
+	}
+	if got := errorSnippet([]byte("short")); got != "short" {
+		t.Fatalf("errorSnippet(short) = %q", got)
 	}
 }
