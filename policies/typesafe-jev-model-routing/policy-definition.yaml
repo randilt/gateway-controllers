@@ -133,3 +133,127 @@ systemParameters:
       "wso2/defaultValue": "${config.jev_model}"
   required:
     - apiKey
+
+# Optional form for the AI Workspace, rendered with react-jsonschema-form. formSchema must keep
+# the same data shape as `parameters` (a test checks this); the gateway validates `parameters` only.
+x-wso2-policy-ui:
+  formSchema:
+    type: object
+    required:
+      - contentPath
+      - routingRules
+      - defaultModel
+    properties:
+      contentPath:
+        type: string
+        title: Text to classify
+        description: JSONPath of the request text Jev classifies. The default reads the last message.
+        default: $.messages[-1].content
+      routingRules:
+        type: array
+        title: Routing rules
+        description: Jev picks the rule whose description best fits each request.
+        minItems: 1
+        maxItems: 255
+        errorMessage:
+          minItems: Add at least one routing rule.
+        items:
+          type: object
+          required:
+            - name
+            - context
+            - model
+          properties:
+            name:
+              type: string
+              title: Rule name
+              description: A unique label, for example Coding questions.
+              minLength: 1
+              errorMessage: Enter a name for this rule.
+            context:
+              type: string
+              title: When to use this rule
+              description: Describe, in plain words, the requests this rule should handle.
+              minLength: 1
+              errorMessage: Describe the requests this rule should handle.
+            provider:
+              type: string
+              title: Provider (optional)
+              description: An additional provider of this proxy, by its alias. Leave empty to keep the current provider.
+            model:
+              type: string
+              title: Model
+              description: The model to route matching requests to.
+              minLength: 1
+              errorMessage: Enter the model to route to.
+      defaultModel:
+        type: string
+        title: Default model
+        description: Used when Jev is unavailable, not confident enough, or picks no rule.
+        minLength: 1
+        errorMessage: Enter the default model.
+      defaultProvider:
+        type: string
+        title: Default provider (optional)
+        description: The provider used with the default model. Rules without a provider don't inherit it.
+      confidenceThreshold:
+        type: number
+        title: Minimum confidence
+        description: Jev must be at least this sure (0 to 1) of its choice; otherwise the default model is used.
+        minimum: 0
+        maximum: 1
+        default: 0.5
+        errorMessage: Enter a confidence from 0 to 1.
+        x-wso2-policy-advanced-param: true
+      timeout:
+        type: string
+        title: Timeout
+        description: How long to wait for Jev, for example 5s or 1500ms, up to 30s. Includes one retry when Jev is busy. On timeout, the default model is used.
+        default: 5s
+        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+        errorMessage: Use a duration such as 5s or 1500ms, up to 30s.
+        x-wso2-policy-advanced-param: true
+      requestModel:
+        type: object
+        description: 'Specifies where the model name appears in the request so the policy
+
+          can replace it with the selected model. Supplied by the gateway from
+
+          the LLM provider template.
+
+          '
+        properties:
+          location:
+            type: string
+            enum:
+              - payload
+          identifier:
+            type: string
+            description: 'JSONPath identifying the model field in the request body.
+
+              '
+        required:
+          - location
+          - identifier
+  uiSchema:
+    ui:order:
+      - contentPath
+      - routingRules
+      - defaultModel
+      - defaultProvider
+      - '*'
+    routingRules:
+      items:
+        ui:order:
+          - name
+          - context
+          - model
+          - provider
+        context:
+          ui:widget: textarea
+          ui:options:
+            rows: 2
+    confidenceThreshold:
+      ui:widget: updown
+    requestModel:
+      ui:widget: hidden

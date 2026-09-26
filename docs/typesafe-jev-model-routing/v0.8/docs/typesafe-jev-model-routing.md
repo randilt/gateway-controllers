@@ -48,6 +48,8 @@ jev_model = "jev-latest"
 
 ### User Parameters (API Definition)
 
+In the AI Workspace, this policy can be configured with a guided form, defined in the `x-wso2-policy-ui` block of its policy definition. It flags invalid values before saving, and hides `requestModel`, which the gateway supplies. The parameters are the same either way.
+
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `routingRules` | array of objects | Yes | — | The routing rules Jev chooses between (1–255). See [Routing rule fields](#routing-rule-fields). |
