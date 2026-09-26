@@ -214,6 +214,10 @@ x-wso2-policy-ui:
             - scope
             - questions
             - mode
+          errorMessage:
+            required:
+              name: Enter a tool name, or * for every tool.
+              scope: Describe, in plain words, what the agent is meant to do.
           properties:
             name:
               type: string

@@ -143,6 +143,10 @@ x-wso2-policy-ui:
       - contentPath
       - routingRules
       - defaultModel
+    errorMessage:
+      required:
+        defaultModel: Enter the default model.
+        routingRules: Add at least one routing rule.
     properties:
       contentPath:
         type: string
@@ -163,6 +167,11 @@ x-wso2-policy-ui:
             - name
             - context
             - model
+          errorMessage:
+            required:
+              name: Enter a name for this rule.
+              context: Describe the requests this rule should handle.
+              model: Enter the model to route to.
           properties:
             name:
               type: string
