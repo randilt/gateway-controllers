@@ -51,6 +51,8 @@ jev_model = "jev-latest"
 
 ### User Parameters (API Definition)
 
+In the AI Workspace, this policy can be configured with a guided form, defined in the `x-wso2-policy-ui` block of its policy definition. Requests and responses are separate sections you turn on, the scale and options fields appear only for the question types that use them, and invalid values are flagged before saving. The parameters are the same either way.
+
 At least one of `request` or `response` is required. Each carries its own independent configuration:
 
 | Parameter | Type | Required | Default | Description |
