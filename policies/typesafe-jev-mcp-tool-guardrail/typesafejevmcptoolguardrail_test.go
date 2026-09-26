@@ -23,8 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"regexp"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -360,25 +359,35 @@ func TestDefaultQuestions(t *testing.T) {
 	}
 }
 
-// The policy definition shows the default questions in the UI, so they must be
-// the same questions the policy falls back to when none are configured.
+// The policy definition shows the default questions in the UI (as the default of
+// each rule's questions, in both parameters and the form), so they must be the
+// same questions the policy falls back to when none are configured.
 func TestDefaultQuestions_MatchPolicyDefinition(t *testing.T) {
-	definition, err := os.ReadFile("policy-definition.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	def := string(definition)
-	if got := len(regexp.MustCompile(`(?m)^ +instructions: "`).FindAllString(def, -1)); got != len(defaultBattery) {
-		t.Fatalf("policy definition lists %d default questions, want %d", got, len(defaultBattery))
-	}
+	def := readPolicyDefinition(t)
+	want := make([]interface{}, 0, len(defaultBattery))
 	for _, q := range defaultQuestions() {
-		if !strings.Contains(def, "- key: "+q.Key+"\n") {
-			t.Errorf("policy definition default is missing key %q", q.Key)
-		}
-		if !strings.Contains(def, "instructions: \""+q.Instructions+"\"\n") {
-			t.Errorf("policy definition default for %q doesn't match the code: %s", q.Key, q.Instructions)
+		want = append(want, map[string]interface{}{
+			"key": q.Key, "type": q.Type, "instructions": q.Instructions, "threshold": q.Threshold,
+		})
+	}
+	for name, schema := range map[string]map[string]interface{}{"parameters": def.Parameters, "formSchema": def.UI.FormSchema} {
+		got := schemaAt(schema, "properties", "tools", "items", "properties", "questions", "default")
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: the default questions don't match defaultBattery:\n got %v\nwant %v", name, got, want)
 		}
 	}
+}
+
+// schemaAt follows keys through nested maps and returns nil if any is missing.
+func schemaAt(v interface{}, keys ...string) interface{} {
+	for _, k := range keys {
+		m, ok := v.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		v = m[k]
+	}
+	return v
 }
 
 func TestMode_BuffersRequestBodyOnly(t *testing.T) {

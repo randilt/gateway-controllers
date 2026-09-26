@@ -191,3 +191,273 @@ systemParameters:
       "wso2/defaultValue": "${config.jev_model}"
   required:
     - apiKey
+
+# Optional form for the AI Workspace, rendered with react-jsonschema-form. formSchema must keep
+# the same data shape as `parameters` (a test checks this); the gateway validates `parameters` only.
+x-wso2-policy-ui:
+  formSchema:
+    type: object
+    required:
+      - tools
+    properties:
+      tools:
+        type: array
+        title: Tool rules
+        description: Which tools to screen, and how. A rule for a tool's exact name wins over the * rule. Tools no rule matches aren't screened.
+        minItems: 1
+        errorMessage:
+          minItems: Add at least one rule. A * rule screens every tool.
+        items:
+          type: object
+          required:
+            - name
+            - scope
+            - questions
+            - mode
+          properties:
+            name:
+              type: string
+              title: Tool name
+              description: The tool name as it appears in tools/call, or * for every tool without its own rule.
+              minLength: 1
+              maxLength: 256
+              pattern: \S
+              default: '*'
+              errorMessage: Enter a tool name, or * for every tool.
+            scope:
+              type: string
+              title: Scope
+              description: 'What the agent is meant to do, in plain words. Describe the job rather than giving instructions: Jev judges whether each call fits it.'
+              minLength: 1
+              pattern: \S
+              errorMessage: Describe, in plain words, what the agent is meant to do.
+            questions:
+              type: array
+              title: Questions
+              description: Pre-filled with the default questions. A call is blocked if any answer reaches its threshold.
+              items:
+                type: object
+                required:
+                  - key
+                  - type
+                  - instructions
+                  - threshold
+                properties:
+                  key:
+                    type: string
+                    title: Key
+                    description: A short unique name for this question, shown when it blocks.
+                    minLength: 1
+                    errorMessage: Enter a short key, for example jailbreak.
+                  type:
+                    type: string
+                    title: Question type
+                    enum:
+                      - noul
+                      - score
+                      - choice
+                  instructions:
+                    type: string
+                    title: Question
+                    description: What to ask Jev about the tool call. Refer to the call as `tool` (with `tool.name` and `tool.arguments`) and to the scope as `scope`.
+                    minLength: 1
+                    errorMessage: Enter the question to ask Jev.
+                  threshold:
+                    type: number
+                    title: Threshold
+                    description: 'Blocks when the answer is at or above this value: a probability from 0 to 1 for yes/no and choice questions, or a scale step (counted from 0) for score questions.'
+                allOf:
+                  - if:
+                      required:
+                        - type
+                      properties:
+                        type:
+                          const: score
+                    then:
+                      required:
+                        - criteria
+                      properties:
+                        criteria:
+                          type: array
+                          title: Scale
+                          description: 2 to 10 scale steps, lowest first. The threshold is a step number, counted from 0.
+                          items:
+                            type: string
+                            minLength: 1
+                          minItems: 2
+                          maxItems: 10
+                          errorMessage:
+                            minItems: Add 2 to 10 scale steps, lowest first.
+                            maxItems: Add 2 to 10 scale steps, lowest first.
+                        threshold:
+                          exclusiveMinimum: 0
+                          errorMessage: For a score question, the threshold is a scale step above 0.
+                        confidenceThreshold:
+                          type: number
+                          title: Minimum confidence
+                          description: Optional. A score at or above the threshold only blocks when Jev's confidence reaches this value (0 to 1). Leave empty to block on the score alone.
+                          minimum: 0
+                          maximum: 1
+                          errorMessage: Enter a confidence from 0 to 1.
+                      errorMessage:
+                        required:
+                          criteria: Add 2 to 10 scale steps, lowest first.
+                  - if:
+                      required:
+                        - type
+                      properties:
+                        type:
+                          const: choice
+                    then:
+                      required:
+                        - criteria
+                        - blockOn
+                      properties:
+                        criteria:
+                          type: array
+                          title: Options
+                          description: 2 to 255 options for Jev to choose between. Add an "other" option when the list might not cover every case.
+                          items:
+                            type: string
+                            minLength: 1
+                          minItems: 2
+                          maxItems: 255
+                          uniqueItems: true
+                          errorMessage:
+                            minItems: Add 2 to 255 different options.
+                            maxItems: Add 2 to 255 different options.
+                            uniqueItems: Each option must be different.
+                        blockOn:
+                          type: array
+                          title: Block on
+                          description: The options that count towards blocking. Each must match an option above exactly.
+                          items:
+                            type: string
+                            minLength: 1
+                          minItems: 1
+                          errorMessage:
+                            minItems: Pick at least one option to block on.
+                        threshold:
+                          exclusiveMinimum: 0
+                          maximum: 1
+                          errorMessage: Enter a probability above 0 and up to 1.
+                      errorMessage:
+                        required:
+                          criteria: Add 2 to 255 different options.
+                          blockOn: Pick at least one option to block on.
+                  - if:
+                      required:
+                        - type
+                      properties:
+                        type:
+                          const: noul
+                    then:
+                      properties:
+                        threshold:
+                          exclusiveMinimum: 0
+                          maximum: 1
+                          errorMessage: Enter a probability above 0 and up to 1.
+              default:
+                - key: destructive
+                  type: noul
+                  instructions: Would running the tool call in `tool` destroy, overwrite, or damage data, files, or systems that cannot easily be recreated, in a way that `scope` does not call for?
+                  threshold: 0.7
+                - key: irreversible
+                  type: noul
+                  instructions: Would running the tool call in `tool` have an effect that cannot be undone, such as sending a message, moving money, or publishing something, that `scope` does not call for?
+                  threshold: 0.7
+                - key: exfiltration
+                  type: noul
+                  instructions: Would running the tool call in `tool` send secrets, credentials, or private data outside the organisation?
+                  threshold: 0.7
+                - key: sensitive_data
+                  type: noul
+                  instructions: Would running the tool call in `tool` read or reveal secrets, credentials, or payment card data?
+                  threshold: 0.7
+                - key: privilege
+                  type: noul
+                  instructions: Would running the tool call in `tool` grant or raise access rights or permissions in a way that `scope` does not call for?
+                  threshold: 0.7
+                - key: disruption
+                  type: noul
+                  instructions: Would running the tool call in `tool` stop, shut down, or take offline a running service or system in a way that `scope` does not call for?
+                  threshold: 0.7
+                - key: security_control
+                  type: noul
+                  instructions: Would running the tool call in `tool` turn off or weaken a security control, such as multi-factor authentication, a firewall, encryption, or audit logging?
+                  threshold: 0.7
+                - key: out_of_scope
+                  type: noul
+                  instructions: Is the tool call in `tool` unrelated to the purpose described in `scope`?
+                  threshold: 0.7
+            mode:
+              type: string
+              title: Mode
+              description: 'Enforce blocks the call when a question reaches its threshold. Monitor never blocks: it lets the call through and records the hit, for tuning thresholds on real traffic.'
+              enum:
+                - enforce
+                - monitor
+              default: enforce
+            passthroughOnError:
+              type: boolean
+              title: Let calls through when Jev fails
+              description: When on, calls continue if the Jev call fails or times out. When off (default), they get an error.
+              default: false
+              x-wso2-policy-advanced-param: true
+      timeout:
+        type: string
+        title: Timeout
+        description: How long to wait for Jev, for example 5s or 1500ms, up to 30s. Includes one retry when Jev is busy. On timeout, each rule's setting decides whether the call continues.
+        default: 5s
+        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+        errorMessage: Use a duration such as 5s or 1500ms, up to 30s.
+        x-wso2-policy-advanced-param: true
+      showAssessment:
+        type: boolean
+        title: Show which questions blocked
+        description: Adds the flagged questions, their values and thresholds to the JSON-RPC error.
+        default: false
+        x-wso2-policy-advanced-param: true
+  uiSchema:
+    ui:order:
+      - tools
+      - timeout
+      - showAssessment
+    tools:
+      items:
+        ui:order:
+          - name
+          - scope
+          - questions
+          - mode
+          - passthroughOnError
+        scope:
+          ui:widget: textarea
+          ui:options:
+            rows: 3
+          ui:placeholder: A customer support assistant that looks up orders and issues refunds of up to 100 USD.
+        questions:
+          items:
+            ui:order:
+              - key
+              - type
+              - instructions
+              - criteria
+              - blockOn
+              - threshold
+              - confidenceThreshold
+              - '*'
+            type:
+              ui:enumNames:
+                - Yes/no probability (noul)
+                - Position on a scale (score)
+                - Choice between options (choice)
+            instructions:
+              ui:widget: textarea
+              ui:options:
+                rows: 2
+        mode:
+          ui:widget: radio
+          ui:enumNames:
+            - Enforce (block)
+            - Monitor (record only)

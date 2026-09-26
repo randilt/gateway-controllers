@@ -60,6 +60,8 @@ jev_model = "jev-latest"
 
 ### User Parameters (API Definition)
 
+In the AI Workspace, this policy can be configured with a guided form, defined in the `x-wso2-policy-ui` block of its policy definition. A new rule comes with `*`, `enforce` and the default questions filled in, the scale and options fields appear only for the question types that use them, and invalid values are flagged before saving. The parameters are the same either way.
+
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `tools` | array of objects | Yes | — | Which tools to screen, and how; see [Tool rules](#tool-rules). At least one rule. |
